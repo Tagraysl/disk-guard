@@ -1,0 +1,12 @@
+$ErrorActionPreference = 'Stop'
+$compiler = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+$wpf = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF'
+Push-Location $PSScriptRoot
+& $compiler /nologo /target:exe /platform:x64 /out:IconMaker.exe /r:System.Drawing.dll IconMaker.cs
+if ($LASTEXITCODE -ne 0) { Pop-Location; throw 'Icon compilation failed' }
+& .\IconMaker.exe
+if ($LASTEXITCODE -ne 0) { Pop-Location; throw 'Icon generation failed' }
+& $compiler /nologo /target:winexe /platform:x64 /win32icon:Guard.ico /out:DiskGuard-Desktop.exe /r:"$wpf\PresentationFramework.dll" /r:"$wpf\PresentationCore.dll" /r:"$wpf\WindowsBase.dll" /r:System.Xaml.dll /r:System.Management.dll Guard.cs StorageProtocolReader.cs
+Remove-Item -LiteralPath IconMaker.exe -Force -ErrorAction SilentlyContinue
+Pop-Location
+if ($LASTEXITCODE -ne 0) { throw 'Compilation failed' }

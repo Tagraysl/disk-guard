@@ -1,0 +1,12 @@
+# Generated build and preview artifacts
+IconMaker.exe
+UiRegression.exe
+preview.png
+ui-regression.png
+*.pdb
+*.obj
+*.cache
+bin/
+obj/
+
+# Keep the portable EXE and release ZIP in the repository for easy download.

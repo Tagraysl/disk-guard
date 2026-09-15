@@ -1,5 +1,9 @@
 # 磁盘观察室 · WPF 便携版
 
+本项目采用 [MIT 许可证](LICENSE)，允许使用、修改、分发和商用，须保留版权和许可声明；软件按现状提供，不作担保。
+
+下载：[Windows 便携包](https://github.com/Tagraysl/disk-guard/raw/refs/heads/main/release/DiskGuard-Desktop-portable.zip)。解压后运行 `DiskGuard-Desktop.exe`。
+
 2026-09-15 界面修正：保持现有布局，使用标准下拉按钮处理选项点击和键盘导航；分类标题统一至少 17 px，指标名称 12 px。身份属性和普通累计记录使用中性色，警示值橙色，明确正常状态绿色，缺失字段灰色；未取得 SMART 预测字段时显示“未采集”。详细指标的分类解释及计算帮助收进悬停“？”提示，完整流程图和章节仍在“评估依据”页。UiRegression.cs 覆盖 11 类下拉的打开、鼠标事件选择、关闭、Escape 和中性/缺失配色；回归模式不会采集磁盘、运行探针或改写用户配置。
 
 直接运行 DiskGuard-Desktop.exe。使用 Windows .NET Framework 4.x 自带的 WPF 组件，无需 Python、安装程序或后台服务；默认不联网，只有在设置中主动启用 Ping0 节点查询后才会发起网络请求。

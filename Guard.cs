@@ -24,7 +24,7 @@ using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 
-public class Guard : Window {
+public partial class Guard : Window {
  enum PageKind { Overview, Details, Settings, Evidence }
  enum DataViewKind { Raw, Derived, Conclusion }
  enum ThemeMode { System, Light, Dark }
@@ -33,7 +33,7 @@ public class Guard : Window {
  StackPanel overviewDisks, detailsDisks, detailsDataStack;
  Canvas detailsChart;
  Border detailsChartCard;
- StackPanel chartOptionsPanel;
+ WrapPanel chartOptionsPanel, chartLegend;
  ComboBox detailsLayerSelector, detailsDriveSelector;
  ComboBox chartDomainSelector, themeSelector;
  CheckBox chartReadCheck, chartWriteCheck, chartIopsCheck, chartQueueCheck, chartActiveCheck;
@@ -65,6 +65,38 @@ public class Guard : Window {
  Task<Ping0Snapshot> ping0Task;
  DateTime lastPing0PollStart = DateTime.MinValue;
  TextBlock ping0StatusText;
+ StackPanel overviewRiskPanel, settingsRiskPanel;
+ const string ColorHelp = "颜色有两套用途，按位置区分：曲线、图例及指标标题前的色点只标识系列（读/写/IOPS/队列/活跃），不表示好坏；普通数值使用中性色。状态文字及风险条才表达评价：绿=明确正常，橙=需关注，红=严重，灰=缺失或尚未判断。未知绝不当成正常，系列颜色不参与寿命评分。Ping0 风控条独立采用其公开分档，分值不是出事概率。";
+ static Brush SeriesBrush(string label) {
+  switch(label) {
+   case "读取": case "读取速度": case "总读取": return new SolidColorBrush(DarkPalette ? Color.FromRgb(112,174,255) : Color.FromRgb(54,116,216));
+   case "写入": case "写入速度": case "总写入": return new SolidColorBrush(DarkPalette ? Color.FromRgb(83,206,222) : Color.FromRgb(8,116,134));
+   case "IOPS": case "总 IOPS": return new SolidColorBrush(DarkPalette ? Color.FromRgb(190,168,255) : Color.FromRgb(112,92,190));
+   case "队列": case "队列长度": return new SolidColorBrush(DarkPalette ? Color.FromRgb(222,149,213) : Color.FromRgb(153,63,140));
+   case "活跃": case "平均活跃": return new SolidColorBrush(DarkPalette ? Color.FromRgb(177,195,216) : Color.FromRgb(80,103,130));
+   default: return null;
+  }
+ }
+ static double? RiskNumber(string value) {
+  double n;
+  return Double.TryParse((value ?? "").Trim(),NumberStyles.Float,CultureInfo.InvariantCulture,out n) && !Double.IsNaN(n) && !Double.IsInfinity(n) && n >= 0 && n <= 100 ? (double?)n : null;
+ }
+ static string RiskBand(double n) { return n <= 15 ? "极度纯净" : n <= 25 ? "纯净" : n <= 40 ? "中性" : n <= 50 ? "轻微风险" : n <= 70 ? "稍高风险" : "极度风险"; }
+ static Brush RiskBrush(double n) {
+  if(n <= 25) return Teal;
+  if(n <= 40) return new SolidColorBrush(DarkPalette ? Color.FromRgb(192,207,118) : Color.FromRgb(104,118,33));
+  if(n <= 50) return new SolidColorBrush(DarkPalette ? Color.FromRgb(234,207,98) : Color.FromRgb(133,107,10));
+  return n <= 70 ? Amber : Red;
+ }
+ UIElement PingRiskWidget() {
+  var stack = new StackPanel();
+  var n = ping0Enabled ? RiskNumber(ping0.IpRisk) : null;
+  stack.Children.Add(HeadingWithHelp("节点风控值", "来自 Ping0 详细 API 的 iprisk，范围 0–100，越高风险越高，不是风险概率。按其 FAQ 上界归档：≤15 极度纯净、≤25 纯净、≤40 中性、≤50 轻微风险、≤70 稍高风险，其余极度风险。边界采用上界包含约定。免费 /geo 和 JSONP 不提供此字段；须自行申请付费 API Key。",17));
+  stack.Children.Add(ValueText(n.HasValue ? n.Value.ToString("0.##",CultureInfo.InvariantCulture) + " / 100 · " + RiskBand(n.Value) : "未采集",18,n.HasValue ? RiskBrush(n.Value) : Muted));
+  if(n.HasValue) stack.Children.Add(new ProgressBar { Minimum=0, Maximum=100, Value=n.Value, Height=8, Margin=new Thickness(0,8,0,8), Foreground=RiskBrush(n.Value), Background=TrackFill, BorderThickness=new Thickness(0) });
+  else stack.Children.Add(Text(!ping0Enabled ? "查询未启用" : String.IsNullOrWhiteSpace(ping0ApiKey) ? "风控值需要付费 API Key；免费接口仅提供基础信息" : "接口未返回有效分值，不能判断节点安全性",13,Muted));
+  return stack;
+ }
  ComboBox ping0IntervalSelector;
  bool probeEnabled;
  string probePath = "";
@@ -185,6 +217,17 @@ public class Guard : Window {
   ComboBox performanceIntervalSelector, healthIntervalSelector;
   ComboBox fontSelector;
  string fontFamilyName = "Microsoft YaHei UI";
+ int textSizeStep;
+ static int activeTextSizeStep;
+ ComboBox textSizeSelector;
+ static double UiFont(double size) { return Math.Max(13, size) + activeTextSizeStep; }
+ FontFamily UiFontFamily() { return new FontFamily((String.IsNullOrWhiteSpace(fontFamilyName) ? "Microsoft YaHei UI" : fontFamilyName) + ", Microsoft YaHei UI, Microsoft YaHei, Segoe UI"); }
+ static void ConfigureText(Window window, bool transparent) {
+  window.UseLayoutRounding = true;
+  window.SnapsToDevicePixels = true;
+  TextOptions.SetTextFormattingMode(window, TextFormattingMode.Display);
+  TextOptions.SetTextRenderingMode(window, transparent ? TextRenderingMode.Grayscale : TextRenderingMode.ClearType);
+ }
  bool settingsPersistence = true;
 
  static Brush Ink = new SolidColorBrush(Color.FromRgb(32,39,52));
@@ -206,9 +249,9 @@ public class Guard : Window {
  static bool DarkPalette;
 
  class DisplayOptions {
-  public bool Read = true, Write = true, Iops = true, Queue = true, Active = true;
-  public bool Temperature = true, Health = true, Wear = true, Errors = true;
-  public bool PowerOnHours = true, Endurance = true, Workload = true;
+  public bool Read = true, Write = true, Iops = false, Queue = false, Active = false;
+  public bool Temperature = true, Health = true, Wear = true, Errors = false;
+  public bool PowerOnHours = false, Endurance = false, Workload = true;
   public bool Any() { return Read || Write || Iops || Queue || Active || Temperature || Health || Wear || Errors || PowerOnHours || Endurance || Workload; }
  }
 
@@ -227,7 +270,7 @@ public class Guard : Window {
   public string OrgType = "";
   public string Error = "";
   public DateTime Updated = DateTime.MinValue;
-  public bool HasRisk { get { return !String.IsNullOrWhiteSpace(IpRisk); } }
+  public bool HasRisk { get { return RiskNumber(IpRisk).HasValue; } }
  }
 
  class ProbeResult {
@@ -257,6 +300,7 @@ public class Guard : Window {
  class Health {
   public int Index;
   public string Model = "未知型号", Media = "未知介质", Bus = "未知总线", Status = "未知";
+  public DateTime CapturedAt = DateTime.UtcNow;
   public string Firmware = "未知", Serial = "未知";
   public long? SizeBytes, BytesPerSector, Partitions, PowerOnHours, PowerCycleCount;
   public bool SmartFailed, SmartKnown;
@@ -291,11 +335,11 @@ public class Guard : Window {
     var thermal = ThermalRisk;
     if(life == "严重" || thermal == "严重") return "严重";
     if(life == "关注" || thermal == "关注") return "关注";
-    if(life == "正常" || thermal == "正常") return "正常";
+    if(life == "未见告警") return "未见告警";
     return "未知";
    }
   }
-  public Brush SeverityBrush { get { return Severity == "严重" ? Red : Severity == "关注" ? Amber : Severity == "正常" ? Teal : Muted; } }
+  public Brush SeverityBrush { get { return Severity == "严重" ? Red : Severity == "关注" ? Amber : Severity == "未见告警" ? Teal : Muted; } }
   public string SerialMasked {
    get {
     if(String.IsNullOrWhiteSpace(Serial) || Serial == "未知") return "未知";
@@ -324,25 +368,28 @@ public class Guard : Window {
   }
   // 寿命证据只看设备自报的健康/退化字段；瞬时温度和性能不会偷偷混入这里。
   public bool HasLifetimeData {
-   get { return Status != "未知" || SmartFailed || Wear.HasValue || AvailableSpare.HasValue || MediaErrors.HasValue || ReadErrors.HasValue || WriteErrors.HasValue || ReadErrorsUncorrected.HasValue || WriteErrorsUncorrected.HasValue || MediaErrorsUncorrected.HasValue || CriticalWarning.HasValue; }
+   get { return (!String.IsNullOrWhiteSpace(Status) && Status != "未知") || SmartKnown || SmartFailed || Wear.HasValue || AvailableSpare.HasValue || MediaErrors.HasValue || ReadErrors.HasValue || WriteErrors.HasValue || ReadErrorsUncorrected.HasValue || WriteErrorsUncorrected.HasValue || MediaErrorsUncorrected.HasValue || CriticalWarning.HasValue; }
   }
   public string LifetimeSeverity {
    get {
     var s = (Status ?? "").ToLowerInvariant();
     byte bits = (byte)(CriticalWarning ?? 0);
     bool critical = SmartFailed || s.Contains("unhealthy") || s.Contains("不健康") || s.Contains("critical") || s.Contains("严重") || s.Contains("failed")
-      || (ReadErrorsUncorrected ?? 0) > 0 || (WriteErrorsUncorrected ?? 0) > 0 || (MediaErrorsUncorrected ?? 0) > 0
-      || (AvailableSpare.HasValue && AvailableSpare.Value <= 0) || (Wear.HasValue && Wear.Value >= 100)
       // NVMe bit 1 是温度阈值，留给 ThermalRisk；其余关键位代表可靠性 / 只读 / 备份风险。
       || (bits & 0x1C) != 0;
     if(critical) return "严重";
     bool warning = s.Contains("warning") || s.Contains("警告") || s.Contains("degraded") || s.Contains("关注")
       || (MediaErrors ?? 0) > 0 || (ReadErrors ?? 0) > 0 || (WriteErrors ?? 0) > 0
-      || (Wear.HasValue && Wear.Value >= 90)
+      || (ReadErrorsUncorrected ?? 0) > 0 || (WriteErrorsUncorrected ?? 0) > 0 || (MediaErrorsUncorrected ?? 0) > 0
+      || (Wear.HasValue && Wear.Value >= 100)
       || (AvailableSpare.HasValue && AvailableSpareThreshold.HasValue && AvailableSpare.Value < AvailableSpareThreshold.Value)
       || (bits & 0x01) != 0;
     if(warning) return "关注";
-    return HasLifetimeData ? "正常" : "未知";
+    bool checkedEvidence = SmartKnown || Status == "正常" || CriticalWarning.HasValue
+      || MediaErrors.HasValue || ReadErrors.HasValue || WriteErrors.HasValue
+      || ReadErrorsUncorrected.HasValue || WriteErrorsUncorrected.HasValue || MediaErrorsUncorrected.HasValue
+      || (AvailableSpare.HasValue && AvailableSpareThreshold.HasValue);
+    return checkedEvidence ? "未见告警" : "未知";
    }
   }
   public string ThermalRisk {
@@ -350,9 +397,8 @@ public class Guard : Window {
     byte bits = (byte)(CriticalWarning ?? 0);
     if((bits & 0x02) != 0) return "严重";
     if(Temperature.HasValue && TemperatureMax.HasValue) {
-     if(Temperature.Value > TemperatureMax.Value) return "严重";
-     if(Temperature.Value >= TemperatureMax.Value * .9) return "关注";
-     return "正常";
+     if(Temperature.Value >= TemperatureMax.Value) return "关注";
+     return "未见告警";
     }
     return "未知";
    }
@@ -369,6 +415,9 @@ public class Guard : Window {
   public PerformanceCounter R, W, IopsCounter, QueueCounter, ActiveCounter;
   public double Read, Write, Iops, Queue, Active;
   public Queue<double> History = new Queue<double>();
+  public bool ReadValid, WriteValid, IopsValid, QueueValid, ActiveValid;
+  public double Idle;
+  public DateTime SampledAt = DateTime.MinValue;
   public Queue<MetricSample> Series = new Queue<MetricSample>();
   readonly object SeriesGate = new object();
   public double Sum;
@@ -388,8 +437,14 @@ public class Guard : Window {
     return c;
    } catch { return null; }
   }
-  static double ReadCounter(PerformanceCounter c) {
-   try { return c == null ? 0 : Math.Max(0, c.NextValue()); } catch { return 0; }
+  static double ReadCounter(PerformanceCounter c, out bool valid) {
+   valid = false;
+   try {
+    if(c == null) return 0;
+    double value = c.NextValue();
+    valid = !Double.IsNaN(value) && !Double.IsInfinity(value) && value >= 0;
+    return valid ? value : 0;
+   } catch { return 0; }
   }
   public Drive(string n) : this(n, true) { }
   public Drive(string n, bool counters) {
@@ -401,7 +456,7 @@ public class Guard : Window {
    W = MakeCounter("PhysicalDisk", "Disk Write Bytes/sec", n);
    IopsCounter = MakeCounter("PhysicalDisk", "Disk Transfers/sec", n);
    QueueCounter = MakeCounter("PhysicalDisk", "Current Disk Queue Length", n);
-   ActiveCounter = MakeCounter("PhysicalDisk", "% Disk Time", n);
+   ActiveCounter = MakeCounter("PhysicalDisk", "% Idle Time", n);
    CounterFault = R == null && W == null;
   }
    static double Median(double[] sorted) {
@@ -417,29 +472,34 @@ public class Guard : Window {
     return sorted[lower] + (sorted[upper] - sorted[lower]) * (position - lower);
    }
    public void Sample(int sampleIntervalSeconds) {
+    SampledAt = DateTime.UtcNow;
     int interval = Math.Max(1, Math.Min(10, sampleIntervalSeconds));
     // 保持“约 5 秒连续证据”的物理时间含义；较慢采样时至少需要一个候选点。
     RequiredStreak = Math.Max(1, (int)Math.Ceiling(5.0 / interval));
     if(LastIntervalSeconds != 0 && LastIntervalSeconds != interval) { Sum = 0; Streak = 0; Since = DateTime.MinValue; }
     LastIntervalSeconds = interval;
-    Read = ReadCounter(R);
-   Write = ReadCounter(W);
-   Iops = ReadCounter(IopsCounter);
-   Queue = ReadCounter(QueueCounter);
-   Active = Math.Min(100, ReadCounter(ActiveCounter));
+    Read = ReadCounter(R, out ReadValid);
+   Write = ReadCounter(W, out WriteValid);
+   Iops = ReadCounter(IopsCounter, out IopsValid);
+   Queue = ReadCounter(QueueCounter, out QueueValid);
+   double idle = ReadCounter(ActiveCounter, out ActiveValid);
+   Idle = idle;
+   ActiveValid = ActiveValid && idle <= 100;
+   Active = ActiveValid ? 100 - idle : 0;
+   CounterFault = !WriteValid;
    lock(SeriesGate) {
-    Series.Enqueue(new MetricSample { Time = DateTime.UtcNow, Read = Read, Write = Write, Iops = Iops, Queue = Queue, Active = Active });
+    if(ReadValid && WriteValid && IopsValid && QueueValid && ActiveValid) Series.Enqueue(new MetricSample { Time = DateTime.UtcNow, Read = Read, Write = Write, Iops = Iops, Queue = Queue, Active = Active }); else Series.Clear(); // 不跨缺失数据连接曲线
     while(Series.Count > 240) Series.Dequeue();
    }
    LastZ = Double.NaN; BaselineMedian = Double.NaN; BaselineMad = Double.NaN; BaselineP95 = Double.NaN; LastCandidate = false;
-   if(CounterFault) { State = "性能计数器不可用"; return; }
+   if(CounterFault) { Sum = 0; Streak = 0; Since = DateTime.MinValue; Last = DateTime.MinValue; State = "无法获取写入计数器；暂停相对评价"; return; }
    double y = Math.Log(1 + Write / 1000000.0);
    var now = DateTime.UtcNow;
     // 允许一次计时抖动，但长间隔必须清除连续证据；基线样本仍保留，不偷偷改写“正常”。
     if((now - Last).TotalSeconds > Math.Max(5.0, interval * 3.0)) { Sum = 0; Streak = 0; Since = DateTime.MinValue; }
    Last = now;
    if(Write <= 0 || Double.IsNaN(Write) || Double.IsInfinity(Write)) {
-    Sum = 0; Streak = 0; Since = DateTime.MinValue; State = "写入空闲 / 无有效样本"; return;
+    Sum = 0; Streak = 0; Since = DateTime.MinValue; State = "当前窗口无写入；不代表整盘空闲"; return;
    }
    bool candidate = false;
    if(History.Count >= 120) {
@@ -463,7 +523,7 @@ public class Guard : Window {
      else Since = DateTime.MinValue;
       State = Streak >= RequiredStreak && Since != DateTime.MinValue && (now - Since).TotalSeconds >= 5 && Sum >= 8 ? "写入高于近期基线" : "近期写入无显著上移";
     }
-   } else State = "学习中 · " + History.Count + " / 120";
+   } else State = "样本不足 · " + History.Count + " / 120 个有效写入样本";
    if(!candidate) History.Enqueue(y);
    if(History.Count > 1800) History.Dequeue();
   }
@@ -642,7 +702,7 @@ public class Guard : Window {
   request.Method = "GET";
   request.Timeout = 12000;
   request.ReadWriteTimeout = 12000;
-  request.UserAgent = "DiskGuard/0.6";
+  request.UserAgent = "DiskGuard/0.7.0";
   using(var response = (HttpWebResponse)request.GetResponse())
   using(var stream = response.GetResponseStream())
   using(var reader = new StreamReader(stream, Encoding.UTF8)) return reader.ReadToEnd();
@@ -767,6 +827,8 @@ public class Guard : Window {
    string url = "https://ping0.cc/apiloc/apikey(" + Uri.EscapeDataString(apiKey.Trim()) + ")/ip(" + Uri.EscapeDataString(normalizedIp) + ")";
    string json = DownloadPing0(url);
    var fromApi = JsonField(json, "ip");
+   string returnedIp;
+   if(!TryNormalizeIp(fromApi,out returnedIp) || returnedIp != normalizedIp) { snap.Status="查询失败"; snap.Error="接口返回的 IP 与查询目标不一致"; snap.Updated=DateTime.Now; return snap; }
    if(!String.IsNullOrWhiteSpace(fromApi)) snap.Ip = fromApi;
    snap.Location = JsonField(json, "location");
    snap.Asn = JsonField(json, "asn");
@@ -778,7 +840,7 @@ public class Guard : Window {
    snap.AsnType = JsonField(json, "asntype");
    snap.OrgType = JsonField(json, "orgtype");
    snap.Status = snap.HasRisk ? "风险字段已取得" : "节点信息已取得";
-   if(!snap.HasRisk) snap.Error = "接口未返回 iprisk";
+   if(!snap.HasRisk) { snap.IpRisk=""; snap.Error = "接口未返回有效的 0–100 风控值"; }
   } catch(WebException ex) {
    snap.Status = "请求失败";
    snap.Error = ex.Status == WebExceptionStatus.Timeout ? "网络请求超时" : "网络不可用或接口拒绝请求";
@@ -898,24 +960,23 @@ public class Guard : Window {
  }
 
  static TextBlock Text(string value, double size, Brush color) {
-  return new TextBlock { Text = value, FontSize = size, Foreground = color, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0,0,0,7) };
+  return new TextBlock { Text = value, FontSize = UiFont(size), Foreground = color, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0,0,0,7) };
  }
  UIElement HelpBadge(string tip) {
-  var mark = new Border { Width = 22, Height = 22, CornerRadius = new CornerRadius(11), Background = InputFill, BorderBrush = CardStroke, BorderThickness = new Thickness(1), Cursor = Cursors.Help, ToolTip = new ToolTip { Content = new TextBlock { Text = tip, TextWrapping = TextWrapping.Wrap, MaxWidth = 380, FontSize = 13, Foreground = Ink }, Background = InputFill, Foreground = Ink, BorderBrush = CardStroke, Padding = new Thickness(12), MaxWidth = 420 } };
+  var mark = new Border { Width = 22, Height = 22, CornerRadius = new CornerRadius(11), Background = InputFill, BorderBrush = CardStroke, BorderThickness = new Thickness(1), Cursor = Cursors.Help, ToolTip = new ToolTip { Content = new TextBlock { Text = tip, TextWrapping = TextWrapping.Wrap, MaxWidth = 380, FontSize = UiFont(13), Foreground = Ink }, Background = InputFill, Foreground = Ink, BorderBrush = CardStroke, Padding = new Thickness(12), MaxWidth = 420 } };
   ToolTipService.SetInitialShowDelay(mark, 250);
   ToolTipService.SetShowDuration(mark, 30000);
-  mark.Child = new TextBlock { Text = "?", FontSize = 11, FontWeight = FontWeights.Bold, Foreground = Muted, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+  mark.Child = new TextBlock { Text = "?", FontSize = UiFont(11), FontWeight = FontWeights.Bold, Foreground = Muted, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
   return mark;
  }
  DockPanel HeadingWithHelp(string title, string tip, double size = 15) {
-  var row = new DockPanel { LastChildFill = false, Margin = new Thickness(0,0,0,6), VerticalAlignment = VerticalAlignment.Center };
+  var row = new DockPanel { LastChildFill = true, Margin = new Thickness(0,0,0,6), VerticalAlignment = VerticalAlignment.Center };
   var heading = Text(title, Math.Max(17, size), Ink); heading.FontWeight = FontWeights.SemiBold; heading.Margin = new Thickness(0,0,8,0); heading.VerticalAlignment = VerticalAlignment.Center;
-  row.Children.Add(heading);
-  var help = HelpBadge(tip); DockPanel.SetDock(help, Dock.Right); row.Children.Add(help);
+  var help = HelpBadge(tip); DockPanel.SetDock(help, Dock.Right); row.Children.Add(help); row.Children.Add(heading);
   return row;
  }
  TextBlock InlineLabel(string value, double width) {
-  return new TextBlock { Text = value, Width = width, FontSize = 11, Foreground = Muted, VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0,0,8,0) };
+  return new TextBlock { Text = value, Width = width, FontSize = UiFont(11), Foreground = Muted, VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0,0,8,0) };
  }
  static Border Card(UIElement child, double radius = 22, Thickness? padding = null) {
   var border = new Border {
@@ -925,14 +986,14 @@ public class Guard : Window {
    Margin = new Thickness(0,0,14,16),
    BorderBrush = CardStroke,
    BorderThickness = new Thickness(1),
-   Effect = radius >= 16 ? new DropShadowEffect { BlurRadius = 18, ShadowDepth = 1, Opacity = DarkPalette ? .16 : .08, Color = Colors.Black } : null,
+   SnapsToDevicePixels = true,
    Child = child
   };
   return border;
  }
  Button ActionButton(string label, Action action, HorizontalAlignment align = HorizontalAlignment.Left) {
   var b = new Button {
-   Content = label,
+   Content = new TextBlock { Text=label, TextWrapping=TextWrapping.Wrap },
    Padding = new Thickness(12,8,12,8),
    Margin = new Thickness(0,0,0,9),
    Background = SurfaceFill,
@@ -940,7 +1001,7 @@ public class Guard : Window {
    BorderThickness = new Thickness(0),
    HorizontalContentAlignment = align,
    Cursor = Cursors.Hand,
-   FontSize = 13
+   FontSize = UiFont(13)
   };
   var template = new ControlTemplate(typeof(Button));
   var border = new FrameworkElementFactory(typeof(Border));
@@ -956,7 +1017,7 @@ public class Guard : Window {
  }
  Button SmallButton(string label, Action action) {
   var b = new Button {
-   Content = label, FontSize = 12, Width = 28, Height = 26, Padding = new Thickness(0),
+   Content = label, FontSize = UiFont(12), Width = 28, Height = 26, Padding = new Thickness(0),
    Background = SurfaceFill, Foreground = Ink,
    BorderThickness = new Thickness(0), Cursor = Cursors.Hand
   };
@@ -964,12 +1025,12 @@ public class Guard : Window {
   return b;
  }
  TextBlock ValueText(string value, double size, Brush color) {
-  return new TextBlock { Text = value, FontSize = size, FontWeight = FontWeights.SemiBold, Foreground = color, Margin = new Thickness(0,3,0,0) };
+  return new TextBlock { Text = value, FontSize = UiFont(size), FontWeight = FontWeights.SemiBold, Foreground = color, TextWrapping=TextWrapping.Wrap, Margin = new Thickness(0,3,0,0) };
  }
  Border MetricCard(string label, string value, Brush color, out TextBlock valueText) {
   var box = new StackPanel();
-  box.Children.Add(Text(label, 11, Muted));
-  valueText = ValueText(value, 18, color);
+  box.Children.Add(Text("● " + label, 11, SeriesBrush(label) ?? Muted));
+  valueText = ValueText(value, 18, Ink);
   box.Children.Add(valueText);
   return Card(box, 18, new Thickness(15,13,15,12));
  }
@@ -999,12 +1060,20 @@ public class Guard : Window {
  }
  static string OptionalNumber(double? value, string suffix = "") { return value.HasValue ? value.Value.ToString("0.##") + suffix : "未采集"; }
  static string MetricPair(string name, string value) { return name + "  " + value; }
- class UniformGridShim : System.Windows.Controls.Primitives.UniformGrid { public UniformGridShim() { Columns = 2; } }
+ class UniformGridShim : System.Windows.Controls.Primitives.UniformGrid {
+  int requestedColumns;
+  public UniformGridShim() { Columns = 2; }
+  protected override Size MeasureOverride(Size available) {
+   if(requestedColumns == 0) requestedColumns = Math.Max(1,Columns);
+   if(!Double.IsInfinity(available.Width)) Columns = Math.Max(1, Math.Min(requestedColumns,(int)(available.Width / (110 + activeTextSizeStep * 10))));
+   return base.MeasureOverride(available);
+  }
+ }
  static Brush BadgeFill(Health h) {
   if(h == null) return new SolidColorBrush(Color.FromArgb(70,150,160,170));
   if(h.Severity == "严重") return new SolidColorBrush(Color.FromArgb(55,185,72,83));
   if(h.Severity == "关注") return new SolidColorBrush(Color.FromArgb(55,183,115,25));
-  if(h.Severity == "正常") return new SolidColorBrush(Color.FromArgb(55,42,147,128));
+  if(h.Severity == "未见告警") return new SolidColorBrush(Color.FromArgb(55,42,147,128));
   return new SolidColorBrush(Color.FromArgb(55,121,132,148));
  }
 
@@ -1025,6 +1094,7 @@ public class Guard : Window {
     if(p.Length == 2) {
       if(p[0].Trim().Equals("theme", StringComparison.OrdinalIgnoreCase)) themeMode = ParseTheme(p[1].Trim());
       else if(p[0].Trim().Equals("font", StringComparison.OrdinalIgnoreCase) && !String.IsNullOrWhiteSpace(p[1].Trim())) fontFamilyName = p[1].Trim();
+      else if(p[0].Trim() == "text_size_step") { int step; if(Int32.TryParse(p[1].Trim(),out step)) textSizeStep = step >= 4 ? 4 : step >= 2 ? 2 : 0; }
      else if(p[0].Trim().Equals("ping0_enabled", StringComparison.OrdinalIgnoreCase)) ping0Enabled = p[1].Trim() == "1";
      else if(p[0].Trim().Equals("ping0_target", StringComparison.OrdinalIgnoreCase)) ping0TargetIp = p[1].Trim();
      else if(p[0].Trim().Equals("ping0_interval", StringComparison.OrdinalIgnoreCase)) {
@@ -1075,6 +1145,7 @@ public class Guard : Window {
     "workload=" + (options.Workload ? "1" : "0"),
      "theme=" + ThemeValue(themeMode),
      "font=" + (fontFamilyName ?? "Microsoft YaHei UI"),
+     "text_size_step=" + textSizeStep.ToString(CultureInfo.InvariantCulture),
     "ping0_enabled=" + (ping0Enabled ? "1" : "0"),
     "ping0_target=" + (ping0TargetIp ?? ""),
     "ping0_interval=" + ping0IntervalMinutes.ToString(CultureInfo.InvariantCulture),
@@ -1087,10 +1158,11 @@ public class Guard : Window {
     "probe_interval=" + probeIntervalMinutes.ToString(CultureInfo.InvariantCulture)
    };
    foreach(var target in probeTargets) savedProbeTargets[target.Key] = (target.Enabled ? "1|" : "0|") + Convert.ToBase64String(Encoding.UTF8.GetBytes(target.Folder));
-   File.WriteAllLines(path, lines.Concat(savedProbeTargets.Select(x => "probe_disk_" + x.Key + "=" + x.Value)), Encoding.UTF8);
+   File.WriteAllLines(path, lines.Concat(savedProbeTargets.Select(x => "probe_disk_" + x.Key + "=" + x.Value)).Concat(MetricChoiceLines()), Encoding.UTF8);
   } catch { }
  }
  bool GetOption(string key) {
+  if(key != null && key.StartsWith("metric_")) return MetricSelected(key.Substring(7));
   switch((key ?? "").ToLowerInvariant()) {
    case "read": return options.Read;
    case "write": return options.Write;
@@ -1108,6 +1180,7 @@ public class Guard : Window {
   }
  }
  void SetOption(string key, bool value, bool refresh) {
+  if(key != null && key.StartsWith("metric_")) metricChoices[key.Substring(7)] = value;
   switch((key ?? "").ToLowerInvariant()) {
    case "read": options.Read = value; break;
    case "write": options.Write = value; break;
@@ -1151,17 +1224,17 @@ public class Guard : Window {
   bool dark = themeMode == ThemeMode.Dark || (themeMode == ThemeMode.System && SystemUsesDarkTheme());
   DarkPalette = dark;
   Ink = new SolidColorBrush(dark ? Color.FromRgb(240,243,250) : Color.FromRgb(32,39,52));
-  Muted = new SolidColorBrush(dark ? Color.FromRgb(168,181,201) : Color.FromRgb(121,132,148));
+  Muted = new SolidColorBrush(dark ? Color.FromRgb(185,197,215) : Color.FromRgb(83,96,115));
   Blue = new SolidColorBrush(dark ? Color.FromRgb(112,174,255) : Color.FromRgb(54,116,216));
-  Teal = new SolidColorBrush(dark ? Color.FromRgb(91,214,180) : Color.FromRgb(42,147,128));
-  Amber = new SolidColorBrush(dark ? Color.FromRgb(247,188,91) : Color.FromRgb(183,115,25));
+  Teal = new SolidColorBrush(dark ? Color.FromRgb(91,214,180) : Color.FromRgb(24,112,94));
+  Amber = new SolidColorBrush(dark ? Color.FromRgb(247,188,91) : Color.FromRgb(143,85,13));
   Red = new SolidColorBrush(dark ? Color.FromRgb(255,117,129) : Color.FromRgb(185,72,83));
   Violet = new SolidColorBrush(dark ? Color.FromRgb(190,168,255) : Color.FromRgb(112,92,190));
-  CardFill = new SolidColorBrush(dark ? Color.FromArgb(235,36,44,59) : Color.FromArgb(226,255,255,255));
-  CardStroke = new SolidColorBrush(dark ? Color.FromArgb(190,92,107,133) : Color.FromArgb(210,255,255,255));
-  SurfaceFill = new SolidColorBrush(dark ? Color.FromArgb(210,40,49,65) : Color.FromArgb(180,255,255,255));
+  CardFill = new SolidColorBrush(dark ? Color.FromRgb(36,44,59) : Color.FromRgb(255,255,255));
+  CardStroke = new SolidColorBrush(dark ? Color.FromRgb(92,107,133) : Color.FromRgb(202,211,225));
+  SurfaceFill = new SolidColorBrush(dark ? Color.FromRgb(40,49,65) : Color.FromRgb(255,255,255));
   SidebarFill = new SolidColorBrush(dark ? Color.FromArgb(205,29,36,50) : Color.FromArgb(195,248,248,251));
-  InputFill = new SolidColorBrush(dark ? Color.FromArgb(235,43,53,71) : Color.FromArgb(220,255,255,255));
+  InputFill = new SolidColorBrush(dark ? Color.FromRgb(43,53,71) : Color.FromRgb(255,255,255));
   InputBorder = new SolidColorBrush(dark ? Color.FromArgb(210,100,117,143) : Color.FromArgb(210,205,215,228));
   InputHighlight = new SolidColorBrush(dark ? Color.FromArgb(225,73,93,125) : Color.FromArgb(220,219,233,251));
   ChartFill = new SolidColorBrush(dark ? Color.FromArgb(140,21,28,41) : Color.FromArgb(90,245,248,252));
@@ -1183,14 +1256,15 @@ public class Guard : Window {
   if(timer != null) timer.Interval = TimeSpan.FromSeconds(Math.Max(1, Math.Min(10, performanceIntervalSeconds)));
  }
  CheckBox OptionCheck(StackPanel panel, string label, string key) {
-  var check = new CheckBox { Content = label, IsChecked = GetOption(key), FontSize = 13, Foreground = Ink, Margin = new Thickness(0,3,0,11), Cursor = Cursors.Hand };
+  var check = new CheckBox { Content = Text(label,13,Ink), IsChecked = GetOption(key), FontSize = UiFont(13), Foreground = Ink, Margin = new Thickness(0,3,10,11), Cursor = Cursors.Hand };
   check.Checked += (s,e) => SetOption(key, true, true);
   check.Unchecked += (s,e) => SetOption(key, false, true);
   panel.Children.Add(check);
   return check;
  }
  CheckBox ChartCheck(string label, bool enabled, Brush color) {
-  var check = new CheckBox { Content = label, IsChecked = enabled, FontSize = 11, Foreground = color, Margin = new Thickness(0,0,15,0), Cursor = Cursors.Hand, VerticalAlignment = VerticalAlignment.Center };
+  color = SeriesBrush(label) ?? Ink;
+  var check = new CheckBox { Content = label, IsChecked = enabled, FontSize = UiFont(11), Foreground = color, Margin = new Thickness(0,0,15,0), Cursor = Cursors.Hand, VerticalAlignment = VerticalAlignment.Center };
   check.Checked += (s,e) => { if(!updatingDetailsControls) RenderPerformanceChart(); };
   check.Unchecked += (s,e) => { if(!updatingDetailsControls) RenderPerformanceChart(); };
   return check;
@@ -1202,9 +1276,10 @@ public class Guard : Window {
   Border shell;
   public FloatingPanel(Guard owner) {
    host = owner;
+   ConfigureText(this,true);
    Title = "Disk Guard 悬浮监测";
-   FontFamily = owner.FontFamily;
-   Width = 340; Height = 210; MinWidth = 280; MinHeight = 150;
+   FontFamily = owner.FontFamily; FontSize = UiFont(13); Opacity = 1;
+   Width = 380; Height = 460; MinWidth = 300; MinHeight = 220;
    WindowStyle = WindowStyle.None; ResizeMode = ResizeMode.CanResizeWithGrip;
    AllowsTransparency = true; Background = Brushes.Transparent; Topmost = true; ShowInTaskbar = false;
    WindowStartupLocation = WindowStartupLocation.Manual;
@@ -1215,18 +1290,20 @@ public class Guard : Window {
     BorderBrush = CardStroke,
     BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(22),
     Padding = new Thickness(16),
-    Effect = new DropShadowEffect { BlurRadius = 22, ShadowDepth = 5, Opacity = .16, Color = Colors.Black }
+    SnapsToDevicePixels = true
    };
    var layout = new DockPanel();
    var header = new Grid { Margin = new Thickness(0,0,0,10) };
    header.ColumnDefinitions.Add(new ColumnDefinition());
    header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
    var titleStack = new StackPanel();
-   titleStack.Children.Add(new TextBlock { Text = "●  磁盘观察室", FontSize = 14, FontWeight = FontWeights.SemiBold, Foreground = Ink });
-   titleStack.Children.Add(new TextBlock { Text = "独立悬浮 · 切换页面也不会消失", FontSize = 10, Foreground = Muted });
+   titleStack.Children.Add(new TextBlock { Text = "●  磁盘观察室", FontSize = UiFont(14), FontWeight = FontWeights.SemiBold, Foreground = Ink });
+   titleStack.Children.Add(new TextBlock { Text = "独立悬浮 · 切换页面也不会消失", FontSize = UiFont(10), Foreground = Muted });
    Grid.SetColumn(titleStack, 0); header.Children.Add(titleStack);
-   var close = host.SmallButton("×", () => Hide());
-   Grid.SetColumn(close, 1); header.Children.Add(close);
+   var actions = new StackPanel { Orientation=Orientation.Horizontal };
+   actions.Children.Add(host.SmallButton("指标", () => { host.RestoreMain(); host.BuildPage(PageKind.Settings); }));
+   actions.Children.Add(host.SmallButton("×", () => Hide()));
+   Grid.SetColumn(actions, 1); header.Children.Add(actions);
    header.MouseLeftButtonDown += (s,e) => { if(e.ChangedButton == MouseButton.Left) try { DragMove(); } catch { } };
    DockPanel.SetDock(header, Dock.Top); layout.Children.Add(header);
    body = new StackPanel();
@@ -1236,50 +1313,9 @@ public class Guard : Window {
    Refresh();
   }
   public void HidePanel() { Hide(); }
-   public void RefreshTheme() { FontFamily = host.FontFamily; if(shell == null) return; shell.Background = SurfaceFill; shell.BorderBrush = CardStroke; Refresh(); }
+   public void RefreshTheme() { FontFamily = host.FontFamily; FontSize = UiFont(13); if(shell == null) return; shell.Background = SurfaceFill; shell.BorderBrush = CardStroke; Refresh(); }
   public void Refresh() {
-   if(body == null) return;
-   body.Children.Clear();
-   var nodeStack = new StackPanel();
-   nodeStack.Children.Add(new TextBlock { Text = "节点纯净度参考 · Ping0", FontSize = 11, FontWeight = FontWeights.SemiBold, Foreground = Teal, Margin = new Thickness(0,0,0,3) });
-   nodeStack.Children.Add(new TextBlock { Text = host.Ping0Summary(), FontSize = 10, Foreground = host.Ping0Brush(), TextWrapping = TextWrapping.Wrap });
-   body.Children.Add(Card(nodeStack, 13, new Thickness(11,8,11,6)));
-   var probeStack = new StackPanel();
-   probeStack.Children.Add(new TextBlock { Text = "固定文件探针", FontSize = 11, FontWeight = FontWeights.SemiBold, Foreground = Violet, Margin = new Thickness(0,0,0,3) });
-   probeStack.Children.Add(new TextBlock { Text = host.probe.Summary, FontSize = 10, Foreground = host.ProbeBrush(), TextWrapping = TextWrapping.Wrap });
-   body.Children.Add(Card(probeStack, 13, new Thickness(11,8,11,6)));
-   if(host.drives.Count == 0) {
-     body.Children.Add(Text("正在连接性能计数器…", 13, Muted));
-     body.Children.Add(Text("启动后会自动显示各物理磁盘指标。", 11, Muted));
-    return;
-   }
-   foreach(var d in host.drives.Values.OrderBy(x => x.Index)) {
-    var h = host.health.ContainsKey(d.Index) ? host.health[d.Index] : null;
-    var cardStack = new StackPanel();
-    var heading = new DockPanel();
-     heading.Children.Add(new TextBlock { Text = "磁盘 " + (d.Index >= 0 ? d.Index.ToString() : d.Name), FontSize = 12, FontWeight = FontWeights.SemiBold, Foreground = Ink });
-     var stateText = new TextBlock { Text = h == null ? "采集中" : h.Severity, FontSize = 11, Foreground = h == null ? Muted : h.SeverityBrush, HorizontalAlignment = HorizontalAlignment.Right };
-    DockPanel.SetDock(stateText, Dock.Right); heading.Children.Add(stateText); cardStack.Children.Add(heading);
-    var metrics = new List<string>();
-    if(host.options.Read) metrics.Add("↓ " + Rate(d.Read));
-    if(host.options.Write) metrics.Add("↑ " + Rate(d.Write));
-    if(host.options.Iops) metrics.Add("IOPS " + d.Iops.ToString("0"));
-    if(host.options.Queue) metrics.Add("队列 " + d.Queue.ToString("0.0"));
-    if(host.options.Active) metrics.Add("活跃 " + d.Active.ToString("0") + "%");
-     cardStack.Children.Add(Text(metrics.Count == 0 ? "请在显示设置中选择指标" : String.Join("  ·  ", metrics), 12, Ink));
-    if(h != null && (host.options.Temperature || host.options.Health || host.options.Wear || host.options.Errors || host.options.PowerOnHours || host.options.Endurance)) {
-     var extra = new List<string>();
-     if(host.options.Health) extra.Add("健康 " + h.Severity);
-     if(host.options.Temperature) extra.Add("温度 " + OptionalNumber(h.Temperature, "°C"));
-     if(host.options.Wear) extra.Add("磨损 " + OptionalNumber(h.Wear, "%"));
-     if(host.options.Errors) extra.Add("错误 " + Count(h.MediaErrors));
-     if(host.options.PowerOnHours) extra.Add("通电 " + Count(h.PowerOnHours) + " h");
-     if(host.options.Endurance && (h.DataUnitsReadBytes.HasValue || h.DataUnitsWrittenBytes.HasValue)) extra.Add("累计读/写 " + Bytes(h.DataUnitsReadBytes) + " / " + Bytes(h.DataUnitsWrittenBytes));
-      cardStack.Children.Add(Text(String.Join("  ·  ", extra), 10, Muted));
-    }
-     if(host.options.Workload) cardStack.Children.Add(Text(d.State, 10, d.State.Contains("高于") ? Amber : Muted));
-    body.Children.Add(Card(cardStack, 15, new Thickness(12,10,12,6)));
-   }
+   if(body != null) host.FillFloating(body);
   }
  }
 
@@ -1288,11 +1324,13 @@ public class Guard : Window {
   settingsPersistence = startMonitoring;
   Title = "Disk Guard · 磁盘观察室";
   Width = 920; Height = 620; MinWidth = 720; MinHeight = 500;
-  FontFamily = new FontFamily("Microsoft YaHei UI"); FontSize = 13;
+  ConfigureText(this,false);
+  FontFamily = new FontFamily("Microsoft YaHei UI"); FontSize = UiFont(13);
    WindowStartupLocation = WindowStartupLocation.CenterScreen;
    Background = Brushes.White; Icon = MakeLogo();
    if(startMonitoring) LoadOptions(); else options = new DisplayOptions();
-   try { FontFamily = new FontFamily(String.IsNullOrWhiteSpace(fontFamilyName) ? "Microsoft YaHei UI" : fontFamilyName); } catch { fontFamilyName = "Microsoft YaHei UI"; FontFamily = new FontFamily(fontFamilyName); }
+   activeTextSizeStep = textSizeStep; FontSize = UiFont(13);
+   try { FontFamily = UiFontFamily(); } catch { fontFamilyName = "Microsoft YaHei UI"; FontFamily = UiFontFamily(); }
    ApplyThemePalette();
   BuildShell();
   timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(performanceIntervalSeconds) };
@@ -1302,8 +1340,8 @@ public class Guard : Window {
   closeToTray = normalRun;
   if(normalRun) { CreateTray(); LoadProbeTargets(); }
   Closing += (s,e) => { if(closeToTray && !exitRequested) { e.Cancel = true; HideToTray(); } };
-  IsVisibleChanged += (s,e) => { if(MainVisible) RenderCurrent(); };
-  StateChanged += (s,e) => { if(MainVisible) RenderCurrent(); };
+  IsVisibleChanged += (s,e) => { if(MainVisible) { RenderCurrent(); RenderPing0Visuals(); } };
+  StateChanged += (s,e) => { if(MainVisible) { RenderCurrent(); RenderPing0Visuals(); } };
   Closed += (s,e) => {
    if(tray != null) { tray.Visible = false; tray.Dispose(); }
    timer.Stop();
@@ -1326,18 +1364,19 @@ public class Guard : Window {
   Content = root;
   root.Background = MakeBackgroundGradient();
   var nav = new DockPanel { Margin = new Thickness(22,28,22,20) };
-  sidebar = new Border { Background = SidebarFill, Child = nav };
+  sidebar = new Border { Background = SidebarFill, Child = new ScrollViewer { Content=nav, VerticalScrollBarVisibility=ScrollBarVisibility.Auto, HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled } };
   root.Children.Add(sidebar);
 
   var footer = new StackPanel();
   footer.Children.Add(Text("●  数据摘要保存在本机", 11, Muted));
   footer.Children.Add(Text("只读监测 · 无需 Python", 11, Muted));
-  footer.Children.Add(Text("Disk Guard / 0.6 Native", 10, Muted));
+  footer.Children.Add(Text("Disk Guard / 0.7.0", 10, Muted));
   DockPanel.SetDock(footer, Dock.Bottom); nav.Children.Add(footer);
 
   var links = new StackPanel(); nav.Children.Add(links);
-  var brand = new StackPanel { Orientation = Orientation.Horizontal };
-  brand.Children.Add(new Image { Source = MakeLogo(), Width = 36, Height = 36, Margin = new Thickness(0,0,10,0) });
+  var brand = new DockPanel { LastChildFill = true };
+  var brandIcon = new Image { Source = MakeLogo(), Width = 36, Height = 36, Margin = new Thickness(0,0,10,0) };
+  DockPanel.SetDock(brandIcon,Dock.Left); brand.Children.Add(brandIcon);
   var brandText = new StackPanel();
   brandText.Children.Add(Text("磁盘观察室", 19, Ink));
   brandText.Children.Add(Text("看见负载，理解状态。", 10, Muted));
@@ -1348,7 +1387,7 @@ public class Guard : Window {
   links.Children.Add(ActionButton("显示设置", () => BuildPage(PageKind.Settings)));
   links.Children.Add(ActionButton("评估依据", () => BuildPage(PageKind.Evidence)));
   links.Children.Add(new Border { Height = 5 });
-  links.Children.Add(ActionButton("打开 / 隐藏悬浮插件", () => ToggleFloating()));
+  links.Children.Add(ActionButton("显示 / 隐藏悬浮窗", () => ToggleFloating()));
   links.Children.Add(ActionButton("隐藏到系统托盘", () => { if(tray != null) HideToTray(); else WindowState = WindowState.Minimized; }));
   links.Children.Add(ActionButton("退出程序", ExitApplication));
 
@@ -1373,7 +1412,7 @@ public class Guard : Window {
   detailsDataStack = null; detailsChart = null; detailsChartCard = null; chartOptionsPanel = null;
   detailsLayerSelector = detailsDriveSelector = chartDomainSelector = themeSelector = null; chartReadCheck = chartWriteCheck = chartIopsCheck = chartQueueCheck = chartActiveCheck = null;
   detailsChartTitle = detailsSelectionHint = null;
-   ping0StatusText = null; ping0IntervalSelector = null; probeStatusText = null; probeRows = null; probeSizeSelector = probeDurationSelector = probeScheduleSelector = null; performanceIntervalSelector = healthIntervalSelector = null; fontSelector = null;
+   ping0StatusText = null; overviewRiskPanel=settingsRiskPanel=null; ping0IntervalSelector = null; probeStatusText = null; probeRows = null; probeSizeSelector = probeDurationSelector = probeScheduleSelector = null; performanceIntervalSelector = healthIntervalSelector = null; fontSelector = textSizeSelector = null;
   pageSubtitle = null;
   var scroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
   main.Children.Add(scroll);
@@ -1394,7 +1433,7 @@ public class Guard : Window {
   else if(page == PageKind.Settings) BuildSettings(panel);
   else BuildEvidence(panel);
   var anim = new DoubleAnimation(0,1,TimeSpan.FromMilliseconds(180));
-  panel.BeginAnimation(OpacityProperty, anim);
+  if(settingsPersistence) panel.BeginAnimation(OpacityProperty, anim);
   RenderCurrent();
  }
 
@@ -1419,8 +1458,8 @@ public class Guard : Window {
   healthStack.Children.Add(overviewHealth);
   panel.Children.Add(Card(healthStack));
   var nodeStack = new StackPanel();
-  nodeStack.Children.Add(HeadingWithHelp("节点纯净度参考 · Ping0", "第三方网络节点参考，不参与硬盘寿命结论；默认关闭，只有启用后才访问 Ping0。", 16));
-  nodeStack.Children.Add(Text("默认关闭 · 不访问第三方", 11, Muted));
+  nodeStack.Children.Add(HeadingWithHelp("附加功能 · 网络节点", "Ping0 是第三方网络服务，与硬盘原始数据、计算指标和健康结论无关。",16));
+  overviewRiskPanel=new StackPanel(); overviewRiskPanel.Children.Add(PingRiskWidget()); nodeStack.Children.Add(overviewRiskPanel);
   overviewNode = Text(Ping0Summary(), 11, Ping0Brush());
   nodeStack.Children.Add(overviewNode);
   panel.Children.Add(Card(nodeStack, 18, new Thickness(17,13,17,9)));
@@ -1435,7 +1474,7 @@ public class Guard : Window {
  }
 
  ComboBox StyledComboBox(double width, double height, Thickness margin) {
-  var combo = new ComboBox { Width = width, Height = height, Margin = margin, Background = InputFill, BorderBrush = InputBorder, Foreground = Ink, Padding = new Thickness(8,5,8,5) };
+  var combo = new ComboBox { Width = width, Height = Math.Max(34,height) + activeTextSizeStep, FontSize = UiFont(13), Margin = margin, Background = InputFill, BorderBrush = InputBorder, Foreground = Ink, Padding = new Thickness(8,5,8,5) };
   // 经典 WPF 默认模板在部分 Windows 主题下会把选中项强制画成浅灰底 + 白字。
   // 这里使用完全自绘的模板，关闭系统主题对闭合态和 Popup 的隐式覆盖。
   combo.Resources[SystemColors.WindowBrushKey] = InputFill;
@@ -1529,7 +1568,7 @@ public class Guard : Window {
  }
 
  TextBox StyledTextBox(double width, string value, Thickness margin) {
-  var box = new TextBox { Width = width, Height = 32, Text = value ?? "", Margin = margin, Background = InputFill, BorderBrush = InputBorder, Foreground = Ink, Padding = new Thickness(8,5,8,5), FontSize = 12 };
+  var box = new TextBox { Width = width, Height = 36 + activeTextSizeStep, VerticalContentAlignment = VerticalAlignment.Center, Text = value ?? "", Margin = margin, Background = InputFill, BorderBrush = InputBorder, Foreground = Ink, Padding = new Thickness(8,3,8,3), FontSize = UiFont(13) };
   box.Resources[SystemColors.WindowBrushKey] = InputFill;
   box.Resources[SystemColors.WindowTextBrushKey] = Ink;
   box.Resources[SystemColors.ControlBrushKey] = InputFill;
@@ -1548,7 +1587,7 @@ public class Guard : Window {
  }
 
  PasswordBox StyledPasswordBox(double width, Thickness margin) {
-  var box = new PasswordBox { Width = width, Height = 32, Margin = margin, Background = InputFill, BorderBrush = InputBorder, Foreground = Ink, Padding = new Thickness(8,5,8,5), FontSize = 12 };
+  var box = new PasswordBox { Width = width, Height = 36 + activeTextSizeStep, Margin = margin, Background = InputFill, BorderBrush = InputBorder, Foreground = Ink, Padding = new Thickness(8,3,8,3), FontSize = UiFont(13) };
   box.Resources[SystemColors.WindowBrushKey] = InputFill;
   box.Resources[SystemColors.WindowTextBrushKey] = Ink;
   box.Resources[SystemColors.ControlBrushKey] = InputFill;
@@ -1560,9 +1599,10 @@ public class Guard : Window {
 
  void BuildDetails(StackPanel panel) {
   var controlStack = new StackPanel();
+  controlStack.Children.Add(HeadingWithHelp("颜色图例", ColorHelp,17));
   controlStack.Children.Add(HeadingWithHelp("查看方式", "原始数据是设备直接报告值；计算指标只使用同一硬盘的历史；结论由来源、缺失和持续性规则筛选。", 16));
-  var controls = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-  controls.Children.Add(InlineLabel("数据层", 44));
+  var controls = new WrapPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+  controls.Children.Add(InlineLabel("数据层", 60));
   detailsLayerSelector = StyledComboBox(150, 32, new Thickness(8,0,16,0));
   detailsLayerSelector.Items.Add(new ComboBoxItem { Content = "原始数据", Tag = DataViewKind.Raw });
   detailsLayerSelector.Items.Add(new ComboBoxItem { Content = "计算指标", Tag = DataViewKind.Derived });
@@ -1587,6 +1627,9 @@ public class Guard : Window {
   var refresh = ActionButton("刷新健康", () => BeginHealthPoll(true));
   refresh.Margin = new Thickness(0,0,0,0); refresh.VerticalAlignment = VerticalAlignment.Center;
   controls.Children.Add(refresh);
+  var fieldItems=controls.Children.Cast<UIElement>().ToArray(); controls.Children.Clear();
+  for(int i=0;i<4;i+=2) { var field=new StackPanel { Orientation=Orientation.Horizontal, Margin=new Thickness(0,0,0,6) }; field.Children.Add(fieldItems[i]); field.Children.Add(fieldItems[i+1]); controls.Children.Add(field); }
+  controls.Children.Add(refresh);
   controlStack.Children.Add(controls);
   detailsSelectionHint = Text("正在准备硬盘筛选器…", 10, Muted);
   controlStack.Children.Add(detailsSelectionHint);
@@ -1598,17 +1641,18 @@ public class Guard : Window {
   panel.Children.Add(Card(controlStack, 18, new Thickness(17,14,17,9)));
 
   var chartStack = new StackPanel();
-  var chartHeading = new DockPanel { LastChildFill = false, Margin = new Thickness(0,0,0,4) };
-  detailsChartTitle = Text("动态性能曲线 · 等待采样", 16, Ink); detailsChartTitle.Margin = new Thickness(0); chartHeading.Children.Add(detailsChartTitle);
+  var chartHeading = new DockPanel { LastChildFill = true, Margin = new Thickness(0,0,0,4) };
+  detailsChartTitle = Text("动态性能曲线 · 等待采样", 16, Ink); detailsChartTitle.Margin = new Thickness(0,0,8,0);
   var chartHelp = HelpBadge("性能数据按采样间隔进入内存环形队列，最多保留最近 4 分钟；时域显示变化，频域显示周期性，不参与寿命评分。"); DockPanel.SetDock(chartHelp, Dock.Right); chartHeading.Children.Add(chartHelp);
+  chartHeading.Children.Add(detailsChartTitle);
   chartStack.Children.Add(chartHeading);
-  chartOptionsPanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0,2,0,8) };
+  chartOptionsPanel = new WrapPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0,2,0,8) };
   chartReadCheck = ChartCheck("读取", true, Blue); chartOptionsPanel.Children.Add(chartReadCheck);
   chartWriteCheck = ChartCheck("写入", true, Teal); chartOptionsPanel.Children.Add(chartWriteCheck);
   chartIopsCheck = ChartCheck("IOPS", false, Ink); chartOptionsPanel.Children.Add(chartIopsCheck);
   chartQueueCheck = ChartCheck("队列", false, Violet); chartOptionsPanel.Children.Add(chartQueueCheck);
   chartActiveCheck = ChartCheck("活跃", true, Amber); chartOptionsPanel.Children.Add(chartActiveCheck);
-  var chartLabel = InlineLabel("图形", 32); chartLabel.FontSize = 10; chartOptionsPanel.Children.Add(chartLabel);
+  var chartLabel = InlineLabel("图形", 40); chartOptionsPanel.Children.Add(chartLabel);
   chartDomainSelector = StyledComboBox(120, 28, new Thickness(7,0,0,0)); chartDomainSelector.VerticalAlignment = VerticalAlignment.Center;
   chartDomainSelector.Items.Add(new ComboBoxItem { Content = "时域趋势", Tag = ChartDomain.Time });
   chartDomainSelector.Items.Add(new ComboBoxItem { Content = "频率谱", Tag = ChartDomain.Frequency });
@@ -1621,6 +1665,7 @@ public class Guard : Window {
   };
   chartOptionsPanel.Children.Add(chartDomainSelector);
   chartStack.Children.Add(chartOptionsPanel);
+  chartLegend = new WrapPanel { Margin=new Thickness(0,0,0,8) }; chartStack.Children.Add(chartLegend);
   detailsChart = new Canvas { Height = 190, Background = ChartFill, ClipToBounds = true };
   detailsChart.SizeChanged += (s,e) => RenderPerformanceChart();
   chartStack.Children.Add(detailsChart);
@@ -1632,23 +1677,13 @@ public class Guard : Window {
 
  void BuildSettings(StackPanel panel) {
   var cardStack = new StackPanel();
-  cardStack.Children.Add(HeadingWithHelp("悬浮插件显示哪些信息", "勾选项只控制悬浮窗显示，不会改变底层采集；选择会保存到本机的小型配置文件。", 17));
-  cardStack.Children.Add(Text("实时性能 · 健康字段 · 累计背景", 11, Muted));
-  var columns = new UniformGridShim { Columns = 2 };
-  var left = new StackPanel(); var right = new StackPanel();
-  OptionCheck(left, "读取速度", "read"); OptionCheck(left, "写入速度", "write");
-  OptionCheck(left, "IOPS", "iops"); OptionCheck(left, "队列长度", "queue");
-  OptionCheck(left, "磁盘活跃度", "active"); OptionCheck(left, "负载判定", "workload");
-  OptionCheck(right, "健康状态", "health"); OptionCheck(right, "温度 / 上限", "temperature");
-  OptionCheck(right, "SSD 磨损", "wear"); OptionCheck(right, "错误计数", "errors");
-  OptionCheck(right, "通电小时", "power_on_hours"); OptionCheck(right, "累计读写 / NVMe", "endurance");
-   columns.Children.Add(left); columns.Children.Add(right); cardStack.Children.Add(columns);
-   panel.Children.Add(Card(cardStack));
+  BuildMetricSelectors(cardStack);
+  panel.Children.Add(Card(cardStack));
 
    var typeStack = new StackPanel();
    typeStack.Children.Add(HeadingWithHelp("字体与层级", "标题、正文、下拉菜单和悬浮窗统一继承这里的字体；中文字体不可用时由 Windows 自动回退。", 17));
    typeStack.Children.Add(Text("统一字体 · 统一层级 · 不改变数据采集", 11, Muted));
-   var fontRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+   var fontRow = new WrapPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
    fontRow.Children.Add(InlineLabel("界面字体", 150));
    fontSelector = StyledComboBox(230, 32, new Thickness(0));
    var fontChoices = new [] { "Microsoft YaHei UI", "Segoe UI", "Microsoft JhengHei UI" };
@@ -1660,15 +1695,28 @@ public class Guard : Window {
     var name = item == null ? "" : (item.Tag as string) ?? "";
     if(String.IsNullOrWhiteSpace(name) || name == fontFamilyName) return;
     fontFamilyName = name;
-    try { FontFamily = new FontFamily(fontFamilyName); } catch { fontFamilyName = "Microsoft YaHei UI"; FontFamily = new FontFamily(fontFamilyName); }
+    try { FontFamily = UiFontFamily(); } catch { fontFamilyName = "Microsoft YaHei UI"; FontFamily = UiFontFamily(); }
     SaveOptions(); ApplyThemePalette(); RebuildShellForTheme();
    };
    fontRow.Children.Add(fontSelector); typeStack.Children.Add(fontRow);
+   var sizeRow = new WrapPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0,10,0,0) };
+   sizeRow.Children.Add(InlineLabel("文字大小",150));
+   textSizeSelector = StyledComboBox(230,34,new Thickness(0));
+   textSizeSelector.Items.Add(new ComboBoxItem { Content = "标准 · 清晰", Tag = 0 });
+   textSizeSelector.Items.Add(new ComboBoxItem { Content = "较大", Tag = 2 });
+   textSizeSelector.Items.Add(new ComboBoxItem { Content = "大号", Tag = 4 });
+   textSizeSelector.SelectedIndex = textSizeStep / 2;
+   textSizeSelector.SelectionChanged += (s,e) => {
+    var item = textSizeSelector.SelectedItem as ComboBoxItem; if(item == null) return;
+    textSizeStep = (int)item.Tag; activeTextSizeStep = textSizeStep; FontSize = UiFont(13);
+    SaveOptions(); ApplyThemePalette(); RebuildShellForTheme();
+   };
+   sizeRow.Children.Add(textSizeSelector); typeStack.Children.Add(sizeRow);
    panel.Children.Add(Card(typeStack, 18, new Thickness(17,14,17,10)));
 
    var samplingStack = new StackPanel();
   samplingStack.Children.Add(HeadingWithHelp("采集频率", "性能计数器是瞬时原始数据；健康 / 温度 / SMART 是变化较慢的设备字段。频率越高，内存样本更新越快，但不会改变硬盘。", 17));
-  var perfRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0,0,0,8) };
+  var perfRow = new WrapPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0,0,0,8) };
   perfRow.Children.Add(InlineLabel("性能原始数据", 150));
   performanceIntervalSelector = StyledComboBox(150, 32, new Thickness(0));
   performanceIntervalSelector.Items.Add(new ComboBoxItem { Content = "每 1 秒", Tag = 1 });
@@ -1679,7 +1727,7 @@ public class Guard : Window {
   performanceIntervalSelector.SelectionChanged += (s,e) => { var item = performanceIntervalSelector.SelectedItem as ComboBoxItem; if(item != null && item.Tag != null) { performanceIntervalSeconds = Convert.ToInt32(item.Tag, CultureInfo.InvariantCulture); ApplySamplingIntervals(); SaveOptions(); RenderCurrent(); } };
   perfRow.Children.Add(performanceIntervalSelector);
   samplingStack.Children.Add(perfRow);
-  var healthRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0,0,0,2) };
+  var healthRow = new WrapPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0,0,0,2) };
   healthRow.Children.Add(InlineLabel("健康 / 温度 / SMART", 150));
   healthIntervalSelector = StyledComboBox(150, 32, new Thickness(0));
   healthIntervalSelector.Items.Add(new ComboBoxItem { Content = "每 1 分钟", Tag = 1 });
@@ -1707,19 +1755,19 @@ public class Guard : Window {
    themeMode = (ThemeMode)item.Tag;
    SaveOptions(); ApplyThemePalette(); RebuildShellForTheme();
   };
-  var themeRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0,4,0,0) };
+  var themeRow = new WrapPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0,4,0,0) };
   themeRow.Children.Add(InlineLabel("主题模式",150)); themeRow.Children.Add(themeSelector); themeStack.Children.Add(themeRow);
   panel.Children.Add(Card(themeStack, 18, new Thickness(17,14,17,10)));
 
   var probeStack = new StackPanel();
   probeStack.Children.Add(HeadingWithHelp("固定文件读写探针", "测试不读取用户已有的大文件，而是在目标文件夹创建固定大小、固定内容的顺序文件；写入并 Flush 后顺序读回、校验，再删除。默认关闭，只有启用并手动或按计划运行。", 17));
   probeStack.Children.Add(Text("这是可控的实际读写，不是硬盘寿命分数；每次会产生设定大小的真实写入。", 11, Muted));
-  var probeEnable = new CheckBox { Content = "启用探针功能（默认关闭）", IsChecked = probeEnabled, FontSize = 13, Foreground = Ink, Margin = new Thickness(0,3,0,8), Cursor = Cursors.Hand };
+  var probeEnable = new CheckBox { Content = "启用探针功能（默认关闭）", IsChecked = probeEnabled, FontSize = UiFont(13), Foreground = Ink, Margin = new Thickness(0,3,0,8), Cursor = Cursors.Hand };
   probeEnable.Checked += (s,e) => { probeEnabled = true; lastProbeStart = DateTime.UtcNow; SaveOptions(); RenderProbeVisuals(); };
   probeEnable.Unchecked += (s,e) => { probeEnabled = false; SaveOptions(); RenderProbeVisuals(); };
   probeStack.Children.Add(probeEnable);
   probeRows = new StackPanel(); probeStack.Children.Add(probeRows); BuildProbeRows();
-  var probeOptions = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0,0,0,8) };
+  var probeOptions = new WrapPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0,0,0,8) };
   probeOptions.Children.Add(InlineLabel("文件大小", 75));
   probeSizeSelector = StyledComboBox(110, 32, new Thickness(0,0,16,0));
   foreach(var mb in new [] { 32, 64, 128, 256, 512 }) probeSizeSelector.Items.Add(new ComboBoxItem { Content = mb + " MB", Tag = mb });
@@ -1751,21 +1799,22 @@ public class Guard : Window {
   panel.Children.Add(Card(probeStack, 18, new Thickness(17,14,17,10)));
 
   var pingStack = new StackPanel();
-  pingStack.Children.Add(HeadingWithHelp("节点纯净度参考 · Ping0", "第三方网络节点参考，不参与硬盘寿命结论；只在启用后查询公网 IP / 目标 IP。详细 iprisk 字段需 API Key，并可能产生服务费用。", 17));
-  pingStack.Children.Add(Text("可选联网 · 不上传磁盘数据", 11, Muted));
-  var pingEnable = new CheckBox { Content = "启用 Ping0 节点查询", IsChecked = ping0Enabled, FontSize = 13, Foreground = Ink, Margin = new Thickness(0,3,0,8), Cursor = Cursors.Hand };
+  pingStack.Children.Add(HeadingWithHelp("附加功能 · 节点风控 / Ping0", "第三方网络节点参考，不参与硬盘寿命结论；只在启用后查询公网 IP / 目标 IP。详细 iprisk 字段需 API Key，并可能产生服务费用。", 17));
+  pingStack.Children.Add(Text("免费接口：IP / 位置 / ASN；风控值：付费 API Key", 11, Muted));
+  settingsRiskPanel=new StackPanel(); settingsRiskPanel.Children.Add(PingRiskWidget()); pingStack.Children.Add(settingsRiskPanel);
+  var pingEnable = new CheckBox { Content = "启用 Ping0 节点查询", IsChecked = ping0Enabled, FontSize = UiFont(13), Foreground = Ink, Margin = new Thickness(0,3,0,8), Cursor = Cursors.Hand };
   pingEnable.Checked += (s,e) => { ping0Enabled = true; ping0 = new Ping0Snapshot { Enabled = true, Status = "正在查询" }; SaveOptions(); RenderPing0Visuals(); BeginPing0Poll(true); };
   pingEnable.Unchecked += (s,e) => { ping0Enabled = false; ping0 = new Ping0Snapshot(); ping0ApiKey = ""; SaveOptions(); RenderPing0Visuals(); RenderCurrent(); };
   pingStack.Children.Add(pingEnable);
-  var targetRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0,0,0,7) };
-  targetRow.Children.Add(new TextBlock { Text = "目标 IP（留空=当前公网 IPv4）", Width = 185, FontSize = 11, Foreground = Muted, VerticalAlignment = VerticalAlignment.Center });
+  var targetRow = new WrapPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0,0,0,7) };
+  targetRow.Children.Add(InlineLabel("目标 IP（留空=当前出口 IP）",185));
   var targetBox = StyledTextBox(220, ping0TargetIp, new Thickness(0,0,10,0));
   targetBox.ToolTip = "留空时使用 Ping0 /geo 获取当前公网地址；填写后仅查询该节点。";
   targetBox.LostFocus += (s,e) => { ping0TargetIp = targetBox.Text.Trim(); SaveOptions(); };
   targetRow.Children.Add(targetBox);
   pingStack.Children.Add(targetRow);
-  var keyRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0,0,0,7) };
-  keyRow.Children.Add(new TextBlock { Text = "API Key（可选）", Width = 185, FontSize = 11, Foreground = Muted, VerticalAlignment = VerticalAlignment.Center });
+  var keyRow = new WrapPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0,0,0,7) };
+  keyRow.Children.Add(new TextBlock { Text = "API Key（可选）", Width = 185, FontSize = UiFont(11), Foreground = Muted, VerticalAlignment = VerticalAlignment.Center });
   var keyBox = StyledPasswordBox(220, new Thickness(0,0,10,0));
   keyBox.Password = ping0ApiKey;
   keyBox.ToolTip = "仅保存在本次运行的内存中，不写入配置文件；关闭程序后需要重新输入。";
@@ -1775,8 +1824,8 @@ public class Guard : Window {
   checkNow.Margin = new Thickness(0);
   keyRow.Children.Add(checkNow);
   pingStack.Children.Add(keyRow);
-  var intervalRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0,0,0,4) };
-  intervalRow.Children.Add(new TextBlock { Text = "自动更新间隔", Width = 185, FontSize = 11, Foreground = Muted, VerticalAlignment = VerticalAlignment.Center });
+  var intervalRow = new WrapPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0,0,0,4) };
+  intervalRow.Children.Add(new TextBlock { Text = "自动更新间隔", Width = 185, FontSize = UiFont(11), Foreground = Muted, VerticalAlignment = VerticalAlignment.Center });
   ping0IntervalSelector = StyledComboBox(140, 32, new Thickness(0));
   ping0IntervalSelector.Items.Add(new ComboBoxItem { Content = "15 分钟", Tag = 15 });
   ping0IntervalSelector.Items.Add(new ComboBoxItem { Content = "30 分钟", Tag = 30 });
@@ -1787,16 +1836,17 @@ public class Guard : Window {
   pingStack.Children.Add(intervalRow);
   ping0StatusText = Text(Ping0Summary(), 10, Ping0Brush());
   pingStack.Children.Add(ping0StatusText);
-  pingStack.Children.Add(Text("隐私边界：不会上传磁盘型号、读写数据或文件内容；开启后只会把公网 IP / 目标 IP 发给 Ping0。iprisk 在界面中按 Ping0 原值显示，不自定义跨运营商阈值，也不参与硬盘寿命评分。", 10, Muted));
+  pingStack.Children.Add(HeadingWithHelp("接口与费用说明", "免费 ping0.cc 和 ipv4/ipv6 子域名仅提供出口地址；/geo 和 JSONP 提供 IP、位置、ASN、组织，不能查询风控值。付费 /apiloc/apikey(KEY)/ip(IP) 返回 iprisk。官方文档目前标价 0.1 元/次，1 万次起购，以官网实际条款为准。Key 仅存于本次进程；自动更新会按设置重复调用付费接口。出口 IP 指本程序请求的出口，不一定与其他软件的代理出口一致。",17));
+  pingStack.Children.Add(ActionButton("查看 Ping0 官方 API 说明", () => Process.Start(new ProcessStartInfo("https://ping0.cc/ip/api") { UseShellExecute=true })));
   panel.Children.Add(Card(pingStack, 18, new Thickness(17,14,17,10)));
 
   var opacityStack = new StackPanel();
   opacityStack.Children.Add(HeadingWithHelp("悬浮透明度", "悬浮窗独立置顶、可拖动；切换主页面或最小化主窗口时仍保持显示。", 17));
   opacityStack.Children.Add(Text("轻盈 · 置顶 · 可拖动", 11, Muted));
-  var slider = new Slider { Minimum = .55, Maximum = 1.0, Value = floating == null ? .94 : floating.Opacity, TickFrequency = .05, IsSnapToTickEnabled = false, Margin = new Thickness(0,6,0,6) };
+  var slider = new Slider { Minimum = .55, Maximum = 1.0, Value = floating == null ? 1.0 : floating.Opacity, TickFrequency = .05, IsSnapToTickEnabled = false, Margin = new Thickness(0,6,0,6) };
   slider.ValueChanged += (s,e) => { if(floating != null) floating.Opacity = e.NewValue; };
   opacityStack.Children.Add(slider);
-  var opacityButtons = new StackPanel { Orientation = Orientation.Horizontal };
+  var opacityButtons = new WrapPanel { Orientation = Orientation.Horizontal };
   opacityButtons.Children.Add(ActionButton("半透明", () => { slider.Value = .72; }, HorizontalAlignment.Center));
   opacityButtons.Children.Add(ActionButton("清晰", () => { slider.Value = .96; }, HorizontalAlignment.Center));
   opacityButtons.Children.Add(ActionButton("打开悬浮", () => ToggleFloating(true), HorizontalAlignment.Center));
@@ -1804,7 +1854,7 @@ public class Guard : Window {
   panel.Children.Add(Card(opacityStack));
 
   var reset = ActionButton("恢复推荐指标", () => {
-   options = new DisplayOptions(); SaveOptions(); BuildPage(PageKind.Settings);
+   options = new DisplayOptions(); metricChoices.Clear(); SaveOptions(); BuildPage(PageKind.Settings);
    if(floating != null && floating.IsVisible) floating.Refresh();
   });
   panel.Children.Add(reset);
@@ -1812,34 +1862,34 @@ public class Guard : Window {
 
  Border FlowNode(string step, string title, string detail, Brush color) {
   var stack = new StackPanel();
-  stack.Children.Add(Text(step, 10, color));
+  stack.Children.Add(Text(step, 10, Ink));
   stack.Children.Add(ValueText(title, 12, Ink));
   stack.Children.Add(Text(detail, 9, Muted));
   var node = Card(stack, 14, new Thickness(9,8,9,6));
-  node.Width = 100; node.Margin = new Thickness(0,0,3,5); node.BorderBrush = color;
+  node.Width = 120; node.Margin = new Thickness(0,0,3,5); node.BorderBrush = CardStroke;
   return node;
  }
- TextBlock FlowArrow() { return new TextBlock { Text = "›", FontSize = 22, Foreground = Muted, Width = 10, VerticalAlignment = VerticalAlignment.Center, TextAlignment = TextAlignment.Center, Margin = new Thickness(0,0,2,5) }; }
+ TextBlock FlowArrow() { return new TextBlock { Text = "›", FontSize = UiFont(22), Foreground = Muted, Width = 10, VerticalAlignment = VerticalAlignment.Center, TextAlignment = TextAlignment.Center, Margin = new Thickness(0,0,2,5) }; }
  Border TreeBlock(string title, string detail, Brush color) {
   var stack = new StackPanel();
-  stack.Children.Add(Text(title, 12, color));
+  stack.Children.Add(Text(title, 12, Ink));
   stack.Children.Add(Text(detail, 10, Muted));
   var node = Card(stack, 14, new Thickness(12,9,12,6));
-  node.BorderBrush = color; node.BorderThickness = new Thickness(2,1,1,1);
+  node.BorderBrush = CardStroke; node.BorderThickness = new Thickness(1);
   return node;
  }
  Border FormulaBlock(string title, string formula, string use, Brush color) {
   var stack = new StackPanel();
-  stack.Children.Add(Text(title, 12, color));
+  stack.Children.Add(Text(title, 12, Ink));
   stack.Children.Add(Text(formula, 11, Ink));
   stack.Children.Add(Text(use, 9, Muted));
   var node = Card(stack, 14, new Thickness(12,9,12,7));
-  node.BorderBrush = color;
+  node.BorderBrush = CardStroke;
   return node;
  }
  Border ChapterBlock(string title, string lead, Brush color, params string[] points) {
   var stack = new StackPanel();
-  var heading = Text(title, 13, color); heading.Margin = new Thickness(0,0,0,4); stack.Children.Add(heading);
+  var heading = Text(title, 13, Ink); heading.Margin = new Thickness(0,0,0,4); stack.Children.Add(heading);
   if(!String.IsNullOrWhiteSpace(lead)) { var intro = Text(lead, 10, Muted); intro.Margin = new Thickness(0,0,0,4); stack.Children.Add(intro); }
   int number = 1;
   foreach(var point in points ?? new string[0]) { var item = Text(number + ". " + point, 10, Ink); item.Margin = new Thickness(0,0,0,4); stack.Children.Add(item); number++; }
@@ -1848,16 +1898,33 @@ public class Guard : Window {
 
  void BuildEvidence(StackPanel panel) {
   var body = new StackPanel();
+  body.Children.Add(HeadingWithHelp("三层分类与来源边界",LayerHelp,18));
+  body.Children.Add(Text("来源层级：原始采集 → 本程序计算 → 规则结论。用途维度：健康、负载、温度、使用记录。两条轴独立；网络节点属于附加功能。",13,Muted));
+  body.Children.Add(HeadingWithHelp("颜色使用规则",ColorHelp,18));
+  body.Children.Add(Text("系列色点 → 对应曲线；状态色 → 对应评价。两者不相互推导。",13,Ink));
+  var colorKey=new WrapPanel();
+  foreach(var label in new [] { "读取","写入","IOPS","队列","活跃" }) { var key=Text("● "+label,13,SeriesBrush(label)); key.Margin=new Thickness(0,0,18,8); colorKey.Children.Add(key); }
+  body.Children.Add(colorKey);
+  body.Children.Add(Text("设备型号、介质、容量和普通读写数值保持中性。只有有依据的状态判断使用绿 / 橙 / 红；未知和缺失使用灰色。网络查询失败不代表节点高风险，Ping0 风控值独立采用服务方分档。",13,Muted));
   body.Children.Add(HeadingWithHelp("理解模型 · 从数据到结论", "这里把原始数据、学习样本、计算、筛选、结论和安全测试分章节说明；页面仍保留流程图。", 18));
   body.Children.Add(Text("章节 1 · 数据流", 14, Ink));
   var flowScroll = new ScrollViewer { HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, VerticalScrollBarVisibility = ScrollBarVisibility.Disabled };
-  var flow = new StackPanel { Orientation = Orientation.Horizontal };
+  var flow = new WrapPanel { Orientation = Orientation.Horizontal };
   flow.Children.Add(FlowNode("01", "采集", "计数器 / SMART / 温度", Blue)); flow.Children.Add(FlowArrow());
   flow.Children.Add(FlowNode("02", "分类", "寿命 · 瞬时 · 累计", Teal)); flow.Children.Add(FlowArrow());
   flow.Children.Add(FlowNode("03", "计算", "基线 / 频谱 / 趋势", Violet)); flow.Children.Add(FlowArrow());
   flow.Children.Add(FlowNode("04", "筛选", "来源 / 缺失 / 持续性", Amber)); flow.Children.Add(FlowArrow());
   flow.Children.Add(FlowNode("05", "结论", "寿命证据 + 当前风险", Red));
   flowScroll.Content = flow; body.Children.Add(flowScroll);
+  body.Children.Add(ChapterBlock("评价依据与缺失语义", "先检查数据，再选择适用的评价方法。没有依据时不评分。", Ink,
+   "实测状态：吞吐量 = 读写字节数 / 实际时间；IOPS = 完成请求数 / 实际时间；平均请求大小约为吞吐量 / IOPS。无完成请求时显示不适用。当前计数器按相邻区间给出速率，组合结果是区间估计。",
+   "忙碌占比 = 100% − Windows PhysicalDisk 的 % Idle Time。不是厂家带宽利用率，也不是故障概率；多盘总览显示各盘算术均值，不代表整机容量使用率。",
+   "设备阈值：只比较设备明确报告的温度上限、备用空间阈值及协议告警。没有阈值就显示阈值未知，不套用统一温度或队列门槛。摄氏温度不做上限百分比预警。",
+   "相对参照：现有模型只分析本次运行中非零写入样本，至少 120 个。高于近期基线不等于异常损伤；经验阈值尚未校准误报概率。重启后样本重学，不能用于跨日退化评价。",
+   "无法获取 = 接口未提供或读取失败；样本不足 = 没有足够可比历史；阈值未知 = 没有设备给定标定值；不适用 = 计算条件不成立；数据已过期 = 超出允许的新鲜度窗口。缺失不能补零。",
+   "性能瓶颈：目前缺少区间响应延迟及同类负载参照，保持无法判定。长期磨损变化缺少跨重启快照，保持样本不足。不会用速度或工作量估算剩余寿命。",
+   "已采集字段未见告警不保证硬盘全部健康。累计错误只说明历史上发生过；磨损达到 100% 表示设备估计耐久度已消耗，不等于已经损坏。",
+   "数据可用性只统计字段是否有效，不是统计置信度。性能数据超过 max(5秒, 3倍采样周期)、健康数据超过 max(60秒, 2倍健康周期) 时，多维评价暂停采用旧值；这是软件新鲜度规则，不是硬件风险阈值。"));
   body.Children.Add(HeadingWithHelp("数据分类树", "同一个字段只进入它对应的角色；瞬时工作量和累计背景不会直接变成寿命下降。", 15));
   var tree = new UniformGridShim { Columns = 2 };
   tree.Children.Add(TreeBlock("├─ 寿命证据 · 进入 LifetimeSeverity", "SMART 预测失败、设备状态、磨损、备用空间、介质 / 读写错误、不可纠正错误、NVMe 可靠性警告。", Red));
@@ -1870,7 +1937,7 @@ public class Guard : Window {
    formulas.Children.Add(FormulaBlock("本盘负载基线", "y = ln(1 + W / 1,000,000)；z = (y − median) / (1.4826 × MAD)", "z > 3.5 且超过本盘 95 分位，并用连续样本覆盖约 5 秒，才标记负载异常；不进入寿命结论。", Blue));
   formulas.Children.Add(FormulaBlock("频率谱", "去均值 → Hann 窗 → Xₖ = Σ xₙe⁻ⁱ²πkn/N；fₖ = k/(NΔt)", "用于观察周期性 I/O；它是工作模式分析，不是健康评分。", Violet));
   formulas.Children.Add(FormulaBlock("温度风险", "当前温度 ÷ 设备自己报告的温度上限", "只判断当前热风险；没有设备上限就显示未知，不使用跨品牌绝对阈值。", Amber));
-  formulas.Children.Add(FormulaBlock("寿命证据", "设备自报健康字段 → 严重 / 关注 / 正常 / 未知", "不把“今天写得多”换算成寿命下降；长期变化需要同一硬盘跨重启快照的差分。", Red));
+  formulas.Children.Add(FormulaBlock("寿命证据", "设备自报健康字段 → 严重 / 关注 / 未见告警 / 未知", "不把“今天写得多”换算成寿命下降；长期变化需要同一硬盘跨重启快照的差分。", Red));
   body.Children.Add(formulas);
   body.Children.Add(Text("章节 2 · 学习样本", 14, Ink));
   var learning = new UniformGridShim { Columns = 2 };
@@ -1934,7 +2001,8 @@ public class Guard : Window {
   if(!String.IsNullOrWhiteSpace(ping0.Ip)) parts.Add("IP " + MaskIp(ping0.Ip));
   if(!String.IsNullOrWhiteSpace(ping0.Location)) parts.Add(ping0.Location);
   if(!String.IsNullOrWhiteSpace(ping0.Asn)) parts.Add(ping0.Asn + (String.IsNullOrWhiteSpace(ping0.AsnName) ? "" : " " + ping0.AsnName));
-  if(!String.IsNullOrWhiteSpace(ping0.IpRisk)) parts.Add("iprisk " + ping0.IpRisk + "（Ping0 原值）");
+  var risk=RiskNumber(ping0.IpRisk);
+  if(risk.HasValue) parts.Add("风控值 " + risk.Value.ToString("0.##") + "/100 · " + RiskBand(risk.Value));
   if(!String.IsNullOrWhiteSpace(ping0.IsNative)) parts.Add(FlagText(ping0.IsNative, "原生 IP", "非原生 IP"));
   if(!String.IsNullOrWhiteSpace(ping0.IsIdc)) parts.Add(FlagText(ping0.IsIdc, "机房节点", "非机房节点"));
   if(!String.IsNullOrWhiteSpace(ping0.Org) && String.IsNullOrWhiteSpace(ping0.AsnName)) parts.Add(ping0.Org);
@@ -1949,8 +2017,8 @@ public class Guard : Window {
  Brush Ping0Brush() {
   if(!ping0Enabled) return Muted;
   if(ping0.Status == "正在查询") return Blue;
-  if(ping0.Status == "请求失败" || ping0.Status == "查询失败" || ping0.Status == "节点地址无效" || ping0.Status == "公网 IP 无效") return Red;
-  return ping0.HasRisk ? Violet : Teal;
+  if(ping0.Status == "请求失败" || ping0.Status == "查询失败" || ping0.Status == "节点地址无效" || ping0.Status == "公网 IP 无效") return Amber;
+  return Ink;
  }
 
  Brush ProbeBrush() {
@@ -2008,6 +2076,8 @@ public class Guard : Window {
  }
 
  void RenderPing0Visuals() {
+  foreach(var panel in new [] { overviewRiskPanel,settingsRiskPanel }) if(panel != null && MainVisible) { panel.Children.Clear(); panel.Children.Add(PingRiskWidget()); }
+  if(floating != null && floating.IsVisible) floating.Refresh();
   string summary = Ping0Summary();
   if(overviewNode != null) { overviewNode.Text = summary; overviewNode.Foreground = Ping0Brush(); }
   if(ping0StatusText != null) { ping0StatusText.Text = summary; ping0StatusText.Foreground = Ping0Brush(); }
@@ -2045,11 +2115,11 @@ public class Guard : Window {
   double totalRead = values.Sum(d => d.Read), totalWrite = values.Sum(d => d.Write);
   double totalIops = values.Sum(d => d.Iops), totalQueue = values.Sum(d => d.Queue);
   double active = values.Length == 0 ? 0 : values.Average(d => d.Active);
-  overviewRead.Text = Rate(totalRead);
-  overviewWrite.Text = Rate(totalWrite);
-  overviewIops.Text = totalIops.ToString("0");
-  overviewQueue.Text = totalQueue.ToString("0.0");
-  overviewActive.Text = active.ToString("0") + "%";
+  overviewRead.Text = Observed(totalRead / 1000000, values.Length > 0 && values.All(d => PerformanceFresh(d) && d.ReadValid), "0.0", " MB/s");
+  overviewWrite.Text = Observed(totalWrite / 1000000, values.Length > 0 && values.All(d => PerformanceFresh(d) && d.WriteValid), "0.0", " MB/s");
+  overviewIops.Text = Observed(totalIops, values.Length > 0 && values.All(d => PerformanceFresh(d) && d.IopsValid), "0", "");
+  overviewQueue.Text = Observed(totalQueue, values.Length > 0 && values.All(d => PerformanceFresh(d) && d.QueueValid), "0.0", "");
+  overviewActive.Text = Observed(active, values.Length > 0 && values.All(d => PerformanceFresh(d) && d.ActiveValid), "0.0", "%（各盘均值）");
   if(overviewNode != null) { overviewNode.Text = Ping0Summary(); overviewNode.Foreground = Ping0Brush(); }
   if(overviewProbe != null) { overviewProbe.Text = probe.Summary; overviewProbe.Foreground = ProbeBrush(); }
   if(overviewDisks == null) return;
@@ -2059,10 +2129,10 @@ public class Guard : Window {
    Health h; health.TryGetValue(d.Index, out h);
    var stack = new StackPanel();
    var head = new DockPanel();
-   head.Children.Add(new TextBlock { Text = "磁盘 " + (d.Index >= 0 ? d.Index.ToString() : d.Name), FontSize = 15, FontWeight = FontWeights.SemiBold, Foreground = Ink });
-    var badge = new Border { Background = BadgeFill(h), CornerRadius = new CornerRadius(10), Padding = new Thickness(8,3,8,3), Child = new TextBlock { Text = h == null ? "采集中" : h.Severity, Foreground = h == null ? Muted : h.SeverityBrush, FontSize = 10 } };
+   head.Children.Add(new TextBlock { Text = "磁盘 " + (d.Index >= 0 ? d.Index.ToString() : d.Name), FontSize = UiFont(15), FontWeight = FontWeights.SemiBold, Foreground = Ink });
+    var badge = new Border { Background = BadgeFill(h), CornerRadius = new CornerRadius(10), Padding = new Thickness(8,3,8,3), Child = new TextBlock { Text = h == null ? "采集中" : h.Severity, Foreground = h == null ? Muted : h.SeverityBrush, FontSize = UiFont(10) } };
    DockPanel.SetDock(badge, Dock.Right); head.Children.Add(badge); stack.Children.Add(head);
-   stack.Children.Add(Text("↓ " + Rate(d.Read) + "   ↑ " + Rate(d.Write) + "   IOPS " + d.Iops.ToString("0") + "   队列 " + d.Queue.ToString("0.0") + "   活跃 " + d.Active.ToString("0") + "%", 12, Ink));
+   stack.Children.Add(Text("↓ " + Observed(d.Read / 1000000, d.ReadValid, "0.0", " MB/s") + "   ↑ " + Observed(d.Write / 1000000, d.WriteValid, "0.0", " MB/s") + "   IOPS " + Observed(d.Iops, d.IopsValid, "0", "") + "   队列 " + Observed(d.Queue, d.QueueValid, "0.0", "") + "   活跃 " + Observed(d.Active, d.ActiveValid, "0.0", "%"), 12, Ink));
    stack.Children.Add(Text(options.Workload ? d.State : "负载判定已隐藏", 11, d.State.Contains("高于") ? Amber : Muted));
    stack.Children.Add(Text(h == null ? "型号 / 温度 / 磨损 / 错误：未采集" : h.Summary(), 10, Muted));
    overviewDisks.Children.Add(Card(stack, 18, new Thickness(16,13,16,7)));
@@ -2117,10 +2187,11 @@ public class Guard : Window {
  }
 
  DockPanel DriveHeading(Drive d, Health h) {
-  var heading = new DockPanel { LastChildFill = false, Margin = new Thickness(0,0,0,12) };
-  heading.Children.Add(new TextBlock { Text = "磁盘 " + (d.Index >= 0 ? d.Index.ToString() : d.Name) + "   ·   " + (h == null ? "型号采集中" : h.Model), FontSize = 15, FontWeight = FontWeights.SemiBold, Foreground = Ink });
-  var badge = new Border { Background = BadgeFill(h), CornerRadius = new CornerRadius(10), Padding = new Thickness(8,3,8,3), Child = new TextBlock { Text = h == null ? "采集中" : h.Severity, Foreground = h == null ? Muted : h.SeverityBrush, FontSize = 10 } };
+  var heading = new DockPanel { LastChildFill = true, Margin = new Thickness(0,0,0,12) };
+  var badge = new Border { Background = BadgeFill(h), CornerRadius = new CornerRadius(10), Padding = new Thickness(8,3,8,3), Child = new TextBlock { Text = h == null ? "采集中" : h.Severity, Foreground = h == null ? Muted : h.SeverityBrush, FontSize = UiFont(10) } };
+  badge.VerticalAlignment=VerticalAlignment.Top;
   DockPanel.SetDock(badge, Dock.Right); heading.Children.Add(badge);
+  heading.Children.Add(new TextBlock { Text = "磁盘 " + (d.Index >= 0 ? d.Index.ToString() : d.Name) + "   ·   " + (h == null ? "型号采集中" : h.Model), FontSize = UiFont(15), FontWeight = FontWeights.SemiBold, Foreground = Ink, TextWrapping=TextWrapping.Wrap, Margin=new Thickness(0,0,8,0) });
   return heading;
  }
 
@@ -2136,9 +2207,13 @@ public class Guard : Window {
   if(neutral.Contains(label)) color = Ink;
   if(new [] { "读取速度", "写入速度", "IOPS", "队列", "活跃", "设备温度上限", "启停次数", "载入卸载", "最大读 / 写延迟" }.Contains(label)) color = Ink;
   if(value == "未知" || value == "未识别介质" || value == "未知容量" || value == "学习中" || value == "未采集" || value == "未采集 / 未采集" || value == "未知 · 未采集") color = Muted;
+  if(value.Contains("无法") || value.Contains("不足") || value.Contains("过期") || value.Contains("阈值未知") || value.Contains("不适用")) color = Muted;
   var stack = new StackPanel();
-  stack.Children.Add(new TextBlock { Text = label, FontSize = 12, FontWeight = FontWeights.Medium, Foreground = Ink, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0,0,0,5) });
-  var valueText = ValueText(value, 13, color); valueText.Margin = new Thickness(0,1,0,0); valueText.TextWrapping = TextWrapping.Wrap;
+  var series = SeriesBrush(label);
+  var title = new TextBlock { FontSize=UiFont(12), FontWeight=FontWeights.Medium, Foreground=Ink, TextWrapping=TextWrapping.Wrap, Margin=new Thickness(0,0,0,5) };
+  if(series != null) title.Inlines.Add(new System.Windows.Documents.Run("● ") { Foreground=series });
+  title.Inlines.Add(new System.Windows.Documents.Run(label)); stack.Children.Add(title);
+  var valueText = ValueText(value, 14, color); valueText.Margin = new Thickness(0,1,0,0); valueText.TextWrapping = TextWrapping.Wrap;
   stack.Children.Add(valueText);
   return DenseCard(stack, 12, new Thickness(8,7,8,6));
  }
@@ -2154,10 +2229,10 @@ public class Guard : Window {
 
  Border MeterTile(string label, double? value, double max, string display, Brush color) {
   var stack = new StackPanel();
-  var head = new DockPanel();
+  var head = new StackPanel();
   head.Children.Add(Text(label, 10, Muted));
-  var valueText = new TextBlock { Text = display, FontSize = 12, FontWeight = FontWeights.SemiBold, Foreground = color, HorizontalAlignment = HorizontalAlignment.Right };
-  DockPanel.SetDock(valueText, Dock.Right); head.Children.Add(valueText); stack.Children.Add(head);
+  var valueText = new TextBlock { Text = display, FontSize = UiFont(12), FontWeight = FontWeights.SemiBold, Foreground = color, TextWrapping=TextWrapping.Wrap };
+  head.Children.Add(valueText); stack.Children.Add(head);
   if(value.HasValue) {
    var bar = new ProgressBar { Minimum = 0, Maximum = max, Value = Clamp(value.Value, 0, max), Height = 7, Margin = new Thickness(0,5,0,0), Background = TrackFill, Foreground = color, BorderThickness = new Thickness(0) };
    stack.Children.Add(bar);
@@ -2165,103 +2240,29 @@ public class Guard : Window {
   return DenseCard(stack, 14, new Thickness(10,7,10,6));
  }
 
- void BuildRawView(List<Drive> selected) {
-  detailsDataStack.Children.Add(HeadingWithHelp("原始数据", "设备直接报告值。名称、介质、总线等身份信息使用中性色；警示为橙色，明确正常状态为绿色，缺失数据为灰色。", 20));
-  foreach(var d in selected) {
-   Health h; health.TryGetValue(d.Index, out h);
-   var stack = new StackPanel(); stack.Children.Add(DriveHeading(d, h));
-   stack.Children.Add(HeadingWithHelp("瞬时运行状态", "每 " + performanceIntervalSeconds + " 秒采样。曲线颜色用于区分读写序列，不表示读写行为的好坏。", 17));
-   var perf = new UniformGridShim { Columns = 6 };
-    AddInfo(perf, "读取速度", Rate(d.Read), Blue); AddInfo(perf, "写入速度", Rate(d.Write), Teal); AddInfo(perf, "IOPS", d.Iops.ToString("0"), Ink); AddInfo(perf, "队列", d.Queue.ToString("0.00"), Violet); AddInfo(perf, "活跃", d.Active.ToString("0") + "%", Amber); AddInfo(perf, "采样周期", performanceIntervalSeconds + " s", Muted);
-   stack.Children.Add(perf);
-   stack.Children.Add(HeadingWithHelp("设备信息", "型号、介质、总线、容量等是中性属性；设备状态和错误字段在健康证据中展示。", 17));
-   var identity = new UniformGridShim { Columns = 6 };
-   if(h == null) {
-    AddInfo(identity, "健康接口", "未采集", Muted);
-    AddInfo(identity, "数据来源", "等待健康轮询", Muted);
-   } else {
-    AddInfo(identity, "型号", h.Model, Ink); AddInfo(identity, "介质", h.MediaLabel, Teal);
-    AddInfo(identity, "总线", h.Bus, Teal); AddInfo(identity, "容量", Bytes(h.SizeBytes), Ink);
-    AddInfo(identity, "固件", h.Firmware, Ink); AddInfo(identity, "序列号", h.SerialMasked, Muted);
-    AddInfo(identity, "扇区大小", h.BytesPerSector.HasValue ? Count(h.BytesPerSector) + " B" : "未采集", Muted); AddInfo(identity, "分区数", Count(h.Partitions), Muted);
-   }
-   stack.Children.Add(identity);
-   if(h != null) {
-   stack.Children.Add(HeadingWithHelp("健康证据", "设备报告的磨损、备用空间、错误和警告。缺失字段不等于正常；历史累计错误也不等于当前正在发生错误。", 17));
-   var lifetimeRaw = new UniformGridShim { Columns = 6 };
-   AddInfo(lifetimeRaw, "设备状态", h.Status, h.Status == "正常" || h.Status == "OK" ? Teal : h.Status == "未知" ? Muted : Amber); AddInfo(lifetimeRaw, "SMART 预测失败", h.SmartFailed ? "是" : h.SmartKnown ? "否" : "未采集", h.SmartFailed ? Red : h.SmartKnown ? Teal : Muted);
-   AddInfo(lifetimeRaw, "磨损百分比", OptionalNumber(h.Wear, "%"), !h.Wear.HasValue ? Muted : h.Wear.Value >= 90 ? Amber : Teal); AddInfo(lifetimeRaw, "备用空间", OptionalNumber(h.AvailableSpare, "%"), !h.AvailableSpare.HasValue ? Muted : h.AvailableSpareThreshold.HasValue && h.AvailableSpare.Value < h.AvailableSpareThreshold.Value ? Amber : Teal);
-   AddInfo(lifetimeRaw, "介质错误", Count(h.MediaErrors), !h.MediaErrors.HasValue ? Muted : h.MediaErrors.Value > 0 ? Red : Teal); AddInfo(lifetimeRaw, "读 / 写错误", Count(h.ReadErrors) + " / " + Count(h.WriteErrors), !h.ReadErrors.HasValue && !h.WriteErrors.HasValue ? Muted : (h.ReadErrors ?? 0) + (h.WriteErrors ?? 0) > 0 ? Red : Teal);
-   AddInfo(lifetimeRaw, "不可纠正读 / 写", Count(h.ReadErrorsUncorrected) + " / " + Count(h.WriteErrorsUncorrected), !h.ReadErrorsUncorrected.HasValue && !h.WriteErrorsUncorrected.HasValue ? Muted : (h.ReadErrorsUncorrected ?? 0) + (h.WriteErrorsUncorrected ?? 0) > 0 ? Red : Teal); AddInfo(lifetimeRaw, "不可纠正介质", Count(h.MediaErrorsUncorrected), !h.MediaErrorsUncorrected.HasValue ? Muted : h.MediaErrorsUncorrected.Value > 0 ? Red : Teal);
-   AddInfo(lifetimeRaw, "NVMe 临界警告", HexByte(h.CriticalWarning), h.CriticalWarning.HasValue && (h.CriticalWarning.Value & 0x1D) != 0 ? Amber : Muted);
-   stack.Children.Add(lifetimeRaw);
-   stack.Children.Add(HeadingWithHelp("温度与累计记录", "温度描述当前热状态；通电时间和累计读写是使用记录。不安全关机非零以橙色提醒，但不直接换算寿命损失。", 17));
-   var contextRaw = new UniformGridShim { Columns = 6 };
-   AddInfo(contextRaw, "当前温度", OptionalNumber(h.Temperature, "°C"), h.ThermalRisk == "严重" ? Red : h.ThermalRisk == "关注" ? Amber : Ink); AddInfo(contextRaw, "设备温度上限", OptionalNumber(h.TemperatureMax, "°C"), Muted);
-   AddInfo(contextRaw, "通电小时", Count(h.PowerOnHours) + (h.PowerOnHours.HasValue ? " h" : ""), Muted); AddInfo(contextRaw, "通电次数", Count(h.PowerCycleCount), Muted);
-   AddInfo(contextRaw, "不安全关机", Count(h.UnsafeShutdowns), !h.UnsafeShutdowns.HasValue ? Muted : h.UnsafeShutdowns.Value > 0 ? Amber : Teal); AddInfo(contextRaw, "控制器忙", OptionalNumber(h.ControllerBusyMinutes, " min"), h.ControllerBusyMinutes.HasValue ? Ink : Muted);
-   AddInfo(contextRaw, "NVMe 累计读取", Bytes(h.DataUnitsReadBytes), Muted); AddInfo(contextRaw, "NVMe 累计写入", Bytes(h.DataUnitsWrittenBytes), Muted);
-   AddInfo(contextRaw, "主机读 / 写命令", Number(h.HostReadCommands) + " / " + Number(h.HostWriteCommands), Muted); AddInfo(contextRaw, "读 / 写已纠正", Count(h.ReadErrorsCorrected) + " / " + Count(h.WriteErrorsCorrected), Muted);
-   AddInfo(contextRaw, "启停次数", Count(h.StartStopCycleCount) + " / 上限 " + Count(h.StartStopCycleCountMax), Muted); AddInfo(contextRaw, "载入卸载", Count(h.LoadUnloadCycleCount) + " / 上限 " + Count(h.LoadUnloadCycleCountMax), Muted);
-   AddInfo(contextRaw, "最大读 / 写延迟", OptionalNumber(h.ReadLatencyMax, " ms") + " / " + OptionalNumber(h.WriteLatencyMax, " ms"), Muted); AddInfo(contextRaw, "错误日志条目", Number(h.ErrorLogEntries), h.ErrorLogEntries.HasValue && h.ErrorLogEntries.Value > 0 ? Amber : h.ErrorLogEntries.HasValue ? Teal : Muted);
-   AddInfo(contextRaw, "制造日期", h.ManufactureDate, Muted);
-   stack.Children.Add(contextRaw);
-   var sourceRaw = new UniformGridShim { Columns = 2 };
-   AddInfo(sourceRaw, "数据来源", h.SourceSummary(), Muted); AddInfo(sourceRaw, "原生接口", h.NativeSource, Muted);
-   stack.Children.Add(sourceRaw);
-    if(!String.IsNullOrWhiteSpace(h.NativeNote)) stack.Children.Add(HeadingWithHelp("接口帮助", h.NativeNote, 17));
-   }
-   detailsDataStack.Children.Add(Card(stack, 18, new Thickness(0,0,0,14)));
-  }
- }
+ void BuildRawView(List<Drive> selected) { BuildCatalogView(selected, RawLayer); }
 
- void BuildDerivedView(List<Drive> selected) {
-  detailsDataStack.Children.Add(HeadingWithHelp("计算指标", "使用本盘写入历史的对数变换、中位数和 MAD 计算负载偏移。详细公式和学习规则见评估依据。", 20));
-  foreach(var d in selected) {
-   Health h; health.TryGetValue(d.Index, out h);
-   var stack = new StackPanel(); stack.Children.Add(DriveHeading(d, h));
-   var grid = new UniformGridShim { Columns = 6 };
-   AddInfo(grid, "负载状态（仅当前）", d.State, d.State.Contains("高于") ? Amber : Blue);
-   AddInfo(grid, "稳健 z 分数（仅当前）", RobustValue(d.LastZ), Double.IsNaN(d.LastZ) ? Muted : (d.LastZ > 3.5 ? Amber : Ink));
-   AddInfo(grid, "近期基线中位数", BaselineRate(d.BaselineMedian), Muted);
-   AddInfo(grid, "基线 MAD（对数尺度）", RobustValue(d.BaselineMad), Muted);
-   AddInfo(grid, "基线 95 分位", BaselineRate(d.BaselineP95), Muted);
-    AddInfo(grid, "候选连续样本", d.Streak.ToString() + " / " + d.RequiredStreak, d.Streak >= d.RequiredStreak ? Amber : Teal);
-    AddInfo(grid, "累积负载证据（秒归一，非寿命）", d.Sum.ToString("0.0") + " / 40", d.Sum >= 8 ? Amber : Teal);
-   AddInfo(grid, "历史样本", d.History.Count.ToString("N0") + "（最多 1800）", Muted);
-   if(h == null) AddInfo(grid, "寿命证据结论", "未知 · 未采集", Muted);
-   else {
-    AddInfo(grid, "寿命证据结论", h.LifetimeSeverity, h.LifetimeSeverity == "严重" ? Red : h.LifetimeSeverity == "关注" ? Amber : h.LifetimeSeverity == "正常" ? Teal : Muted);
-    AddInfo(grid, "当前温度风险", h.ThermalRisk, h.ThermalRisk == "严重" ? Red : h.ThermalRisk == "关注" ? Amber : h.ThermalRisk == "正常" ? Teal : Muted);
-    AddInfo(grid, "寿命字段覆盖", HealthCoverage(h), Muted);
-   }
-   stack.Children.Add(grid);
-   if(h != null) {
-   var meters = new UniformGridShim { Columns = 3 };
-    meters.Children.Add(MeterTile("SSD 磨损（设备报告）", h.Wear, 100, OptionalNumber(h.Wear, "%"), !h.Wear.HasValue ? Muted : h.Wear.Value >= 90 ? Amber : Teal));
-    meters.Children.Add(MeterTile("备用空间（设备报告）", h.AvailableSpare, 100, OptionalNumber(h.AvailableSpare, "%"), !h.AvailableSpare.HasValue ? Muted : h.AvailableSpareThreshold.HasValue && h.AvailableSpare.Value < h.AvailableSpareThreshold.Value ? Amber : Teal));
-    if(h.Temperature.HasValue && h.TemperatureMax.HasValue) meters.Children.Add(MeterTile("温度 / 设备上限", h.Temperature, h.TemperatureMax.Value, h.Temperature.Value.ToString("0.0") + " / " + h.TemperatureMax.Value.ToString("0") + " °C", h.ThermalRisk == "严重" ? Red : h.ThermalRisk == "关注" ? Amber : Teal));
-    else meters.Children.Add(InfoTile("温度（设备阈值未知）", OptionalNumber(h.Temperature, "°C"), h.Temperature.HasValue ? Ink : Muted));
-    stack.Children.Add(meters);
-   }
-   stack.Children.Add(Text("长期磨损速率  未计算（需要跨重启的轻量快照；不会用今天的工作强度冒充寿命变化）", 10, Muted));
-   detailsDataStack.Children.Add(Card(stack, 18, new Thickness(0,0,0,14)));
-  }
-  var formula = new StackPanel();
-  formula.Children.Add(Text("为什么这样算", 13, Ink));
-   formula.Children.Add(Text("① ln(1 + 写入速度 / 1,000,000) 压缩极端峰值；② 中位数代表本盘近期典型状态；③ MAD 对离群点稳健，乘 1.4826 后与标准差同尺度；④ E ← E + (clip(z, −4, 4) − 0.5) × Δt，并限制在 0–40；⑤ z > 3.5 且超过本盘 95 分位，并用连续样本覆盖约 5 秒（至少 ceil(5 / 采样间隔) 个点）才标记“高于近期基线”。这只是负载证据，不是硬盘寿命百分比。", 10, Muted));
-  var formulaHelp = String.Join("\n", formula.Children.OfType<TextBlock>().Select(x => x.Text));
-  detailsDataStack.Children.Add(HeadingWithHelp("计算帮助", formulaHelp));
-  var mapping = new StackPanel();
-  mapping.Children.Add(Text("指标如何被使用", 13, Ink));
-  mapping.Children.Add(Text("性能采样 → 当前负载事件；温度 / 设备上限 → 当前热风险；通电、累计读写、异常关机 → 累计背景；磨损、备用空间、SMART、不可纠正错误 → 寿命证据。只有最后一类直接进入寿命结论，前两类不会因为今天工作量大就把寿命判低。", 10, Muted));
-  detailsDataStack.Children.Add(HeadingWithHelp("指标用途", String.Join("\n", mapping.Children.OfType<TextBlock>().Select(x => x.Text))));
+ static string Observed(double value, bool valid, string format, string unit) {
+  return valid && !Double.IsNaN(value) && !Double.IsInfinity(value) && value >= 0 ? value.ToString(format) + unit : "无法获取";
  }
+ bool PerformanceFresh(Drive d) {
+  return d != null && d.SampledAt != DateTime.MinValue && (DateTime.UtcNow - d.SampledAt).TotalSeconds <= Math.Max(5, performanceIntervalSeconds * 3);
+ }
+ bool HealthFresh(Health h) {
+  return h != null && (DateTime.UtcNow - h.CapturedAt).TotalSeconds <= Math.Max(60, healthPollMinutes * 120);
+ }
+ string WorkloadSummary(Drive d) {
+  if(!PerformanceFresh(d)) return "等待有效采样 / 数据已过期";
+  if(!d.ReadValid || !d.WriteValid) return "无法评价：读写计数器缺失";
+  if(d.Read + d.Write == 0) return "当前采样窗口无读写流量";
+  return "吞吐 " + Rate(d.Read + d.Write) + " · 写入占比 " + (100 * d.Write / (d.Read + d.Write)).ToString("0.0") + "%";
+ }
+ void BuildDerivedView(List<Drive> selected) { BuildCatalogView(selected, DerivedLayer); }
 
  static string HealthCoverage(Health h) {
   if(h == null) return "0 项";
   int n = 0;
-  if(h.Status != "未知") n++; if(h.SmartFailed) n++; if(h.Wear.HasValue) n++; if(h.AvailableSpare.HasValue) n++;
+  if(h.Status != "未知") n++; if(h.SmartKnown || h.SmartFailed) n++; if(h.Wear.HasValue) n++; if(h.AvailableSpare.HasValue) n++;
   if(h.MediaErrors.HasValue || h.ReadErrors.HasValue || h.WriteErrors.HasValue) n++;
   if(h.ReadErrorsUncorrected.HasValue || h.WriteErrorsUncorrected.HasValue || h.MediaErrorsUncorrected.HasValue) n++;
   if(h.CriticalWarning.HasValue) n++;
@@ -2274,12 +2275,11 @@ public class Guard : Window {
   if(h.SmartFailed) reasons.Add("SMART 预测失败");
   if(h.Status != "未知" && h.Status != "正常") reasons.Add("设备状态报告为“" + h.Status + "”");
   if(h.CriticalWarning.HasValue && (h.CriticalWarning.Value & 0x1D) != 0) reasons.Add("NVMe 可靠性 / 备用空间 / 只读相关警告 0x" + h.CriticalWarning.Value.ToString("X2"));
-  if(h.Wear.HasValue && h.Wear.Value >= 100) reasons.Add("磨损百分比达到设备上限");
-  else if(h.Wear.HasValue && h.Wear.Value >= 90) reasons.Add("磨损百分比接近设备上限（≥90%）");
+  if(h.Wear.HasValue && h.Wear.Value >= 100) reasons.Add("设备报告估计耐久度已消耗；不等于已经故障，也不是故障概率");
   if(h.AvailableSpare.HasValue && h.AvailableSpareThreshold.HasValue && h.AvailableSpare.Value < h.AvailableSpareThreshold.Value) reasons.Add("备用空间低于设备阈值");
-  if((h.ReadErrorsUncorrected ?? 0) > 0 || (h.WriteErrorsUncorrected ?? 0) > 0 || (h.MediaErrorsUncorrected ?? 0) > 0) reasons.Add("存在不可纠正错误计数");
+  if((h.ReadErrorsUncorrected ?? 0) > 0 || (h.WriteErrorsUncorrected ?? 0) > 0 || (h.MediaErrorsUncorrected ?? 0) > 0) reasons.Add("存在历史不可纠正错误计数；缺少可比快照，尚不能判断是否新增");
   else if((h.MediaErrors ?? 0) > 0 || (h.ReadErrors ?? 0) > 0 || (h.WriteErrors ?? 0) > 0) reasons.Add("存在可报告的介质 / 读写错误计数");
-  if(reasons.Count == 0) reasons.Add("当前采集到的直接健康字段未触发风险规则");
+  if(reasons.Count == 0) reasons.Add(h.LifetimeSeverity == "未知" ? "已有原始字段，但缺少可用判据，无法作健康评价" : "当前采集到且可判定的健康字段未触发告警；不代表全部健康");
   return reasons;
  }
 
@@ -2287,43 +2287,14 @@ public class Guard : Window {
   var reasons = new List<string>();
   if(h == null || h.ThermalRisk == "未知") reasons.Add("没有设备温度上限，当前温度只作记录，不用绝对阈值猜测风险");
   else if(h.ThermalRisk == "严重") reasons.Add("当前温度超过设备报告上限或触发温度警告");
-  else if(h.ThermalRisk == "关注") reasons.Add("当前温度接近设备报告上限");
+  else if(h.ThermalRisk == "关注") reasons.Add("当前温度达到或超过设备报告上限");
   else reasons.Add("当前温度未超过设备报告上限");
   if(d != null && d.State.Contains("高于")) reasons.Add("近期写入高于本盘基线；这是工作负载事件，不等于寿命下降");
-  else if(d != null) reasons.Add("近期负载未触发持续异常规则");
+  else if(d != null) reasons.Add(d.State + "；仅描述近期写入，不能代表整盘性能或健康");
   return reasons;
  }
 
- void BuildConclusionView(List<Drive> selected) {
-  detailsDataStack.Children.Add(Text("结论", 18, Ink));
-  detailsDataStack.Children.Add(Text("结论是规则筛选后的证据摘要，不是跨品牌、跨介质的寿命百分比。速度快慢不会抵消 SMART、温度或错误字段中的硬证据。", 11, Muted));
-  foreach(var d in selected) {
-   Health h; health.TryGetValue(d.Index, out h);
-   string severity = h == null ? "未知" : h.Severity;
-   Brush color = h == null ? Muted : h.SeverityBrush;
-   var stack = new StackPanel(); stack.Children.Add(DriveHeading(d, h));
-   var verdicts = new UniformGridShim { Columns = 2 };
-   string life = h == null ? "未知" : h.LifetimeSeverity;
-   string thermal = h == null ? "未知" : h.ThermalRisk;
-   Brush lifeColor = life == "严重" ? Red : life == "关注" ? Amber : life == "正常" ? Teal : Muted;
-   Brush thermalColor = thermal == "严重" ? Red : thermal == "关注" ? Amber : thermal == "正常" ? Teal : Muted;
-   verdicts.Children.Add(InfoTile("寿命证据（参与寿命评估）", life + (h == null ? "" : " · " + HealthCoverage(h)), lifeColor));
-   verdicts.Children.Add(InfoTile("当前运行风险（不等于寿命）", thermal, thermalColor));
-   stack.Children.Add(verdicts);
-   stack.Children.Add(Text("寿命结论依据", 12, Ink));
-   foreach(var reason in LifetimeReasons(h)) stack.Children.Add(Text("• " + reason, 11, lifeColor == Red ? Red : Muted));
-   stack.Children.Add(Text("当前状态依据", 12, Ink));
-   foreach(var reason in OperationalReasons(h, d)) stack.Children.Add(Text("• " + reason, 11, thermalColor == Red ? Red : Muted));
-   if(h != null) stack.Children.Add(Text("来源  " + h.SourceSummary(), 10, Muted));
-   var card = Card(stack, 18, new Thickness(17,14,17,11));
-   card.BorderBrush = new SolidColorBrush(Color.FromArgb(180, ((SolidColorBrush)color).Color.R, ((SolidColorBrush)color).Color.G, ((SolidColorBrush)color).Color.B));
-   detailsDataStack.Children.Add(card);
-  }
-  var note = new StackPanel();
-  note.Children.Add(Text("解释边界", 13, Ink));
-  note.Children.Add(Text("寿命证据只由设备健康 / 退化字段触发；当前温度和瞬时负载单独展示。正常 = 已采集的寿命字段未触发规则；未知 = 寿命字段不足；关注 / 严重 = 至少一个寿命证据触发规则。长期磨损趋势需要保存跨重启的摘要快照，当前不会凭单日负载推断寿命。", 10, Muted));
-  detailsDataStack.Children.Add(Card(note, 16, new Thickness(15,12,15,8)));
- }
+ void BuildConclusionView(List<Drive> selected) { BuildCatalogView(selected, ConclusionLayer); }
 
  class ChartLine {
   public string Label;
@@ -2358,7 +2329,7 @@ public class Guard : Window {
  }
 
  void CanvasText(Canvas canvas, string value, double left, double top, Brush color, double size) {
-  var text = new TextBlock { Text = value, FontSize = size, Foreground = color, IsHitTestVisible = false };
+  var text = new TextBlock { Text = value, FontSize = UiFont(size), Foreground = color, IsHitTestVisible = false, MaxWidth=Math.Max(1,canvas.ActualWidth-left-4), TextTrimming=TextTrimming.CharacterEllipsis };
   Canvas.SetLeft(text, left); Canvas.SetTop(text, top); canvas.Children.Add(text);
  }
 
@@ -2417,6 +2388,7 @@ public class Guard : Window {
  void RenderPerformanceChart() {
   if(!MainVisible) return;
   if(detailsChart == null) return;
+  if(chartLegend != null) chartLegend.Children.Clear();
   detailsChart.Children.Clear();
   var selected = SelectedDetailsDrives();
   var points = ChartSeries(selected);
@@ -2430,27 +2402,27 @@ public class Guard : Window {
   }
   var lines = new List<ChartLine>();
   if(chartReadCheck == null || chartReadCheck.IsChecked == true) {
-   var line = new ChartLine { Label = "读取", Color = Blue, Values = points.Select(x => x.Read).ToList(), Unit = "MB/s" };
+   var line = new ChartLine { Label = "读取", Color = SeriesBrush("读取"), Values = points.Select(x => x.Read).ToList(), Unit = "MB/s" };
    if(spectrum) { var spec = ComputeSpectrum(line.Values, points); line.Values = spec.Magnitudes; line.Frequencies = spec.Frequencies; line.Unit = "Hz"; }
    if(!spectrum || line.Values.Count > 0) lines.Add(line);
   }
   if(chartWriteCheck == null || chartWriteCheck.IsChecked == true) {
-   var line = new ChartLine { Label = "写入", Color = Teal, Values = points.Select(x => x.Write).ToList(), Unit = "MB/s" };
+   var line = new ChartLine { Label = "写入", Color = SeriesBrush("写入"), Values = points.Select(x => x.Write).ToList(), Unit = "MB/s" };
    if(spectrum) { var spec = ComputeSpectrum(line.Values, points); line.Values = spec.Magnitudes; line.Frequencies = spec.Frequencies; line.Unit = "Hz"; }
    if(!spectrum || line.Values.Count > 0) lines.Add(line);
   }
   if(chartIopsCheck != null && chartIopsCheck.IsChecked == true) {
-   var line = new ChartLine { Label = "IOPS", Color = Ink, Values = points.Select(x => x.Iops).ToList(), Unit = "次/s" };
+   var line = new ChartLine { Label = "IOPS", Color = SeriesBrush("IOPS"), Values = points.Select(x => x.Iops).ToList(), Unit = "次/s" };
    if(spectrum) { var spec = ComputeSpectrum(line.Values, points); line.Values = spec.Magnitudes; line.Frequencies = spec.Frequencies; line.Unit = "Hz"; }
    if(!spectrum || line.Values.Count > 0) lines.Add(line);
   }
   if(chartQueueCheck != null && chartQueueCheck.IsChecked == true) {
-   var line = new ChartLine { Label = "队列", Color = Violet, Values = points.Select(x => x.Queue).ToList(), Unit = "长度" };
+   var line = new ChartLine { Label = "队列", Color = SeriesBrush("队列"), Values = points.Select(x => x.Queue).ToList(), Unit = "长度" };
    if(spectrum) { var spec = ComputeSpectrum(line.Values, points); line.Values = spec.Magnitudes; line.Frequencies = spec.Frequencies; line.Unit = "Hz"; }
    if(!spectrum || line.Values.Count > 0) lines.Add(line);
   }
   if(chartActiveCheck != null && chartActiveCheck.IsChecked == true) {
-   var line = new ChartLine { Label = "活跃", Color = Amber, Values = points.Select(x => x.Active).ToList(), Unit = "%" };
+   var line = new ChartLine { Label = "活跃", Color = SeriesBrush("活跃"), Values = points.Select(x => x.Active).ToList(), Unit = "%" };
    if(spectrum) { var spec = ComputeSpectrum(line.Values, points); line.Values = spec.Magnitudes; line.Frequencies = spec.Frequencies; line.Unit = "Hz"; }
    if(!spectrum || line.Values.Count > 0) lines.Add(line);
   }
@@ -2501,15 +2473,13 @@ public class Guard : Window {
    CanvasText(detailsChart, points[0].Time.ToLocalTime().ToString("HH:mm:ss"), left, height - 19, Muted, 9);
    CanvasText(detailsChart, points[points.Count - 1].Time.ToLocalTime().ToString("HH:mm:ss"), width - 65, height - 19, Muted, 9);
   }
-  double legendLeft = left + 8;
   foreach(var line in lines) {
    string latest;
    if(spectrum) {
     int peak = 0; for(int i = 1; i < line.Values.Count; i++) if(line.Values[i] > line.Values[peak]) peak = i;
     latest = "峰值 " + (line.Frequencies == null || line.Frequencies.Count == 0 ? "—" : line.Frequencies[peak].ToString("0.###") + " Hz");
    } else latest = line.Unit == "MB/s" ? Rate(line.Values[line.Values.Count - 1]) : line.Unit == "%" ? line.Values[line.Values.Count - 1].ToString("0") + "%" : line.Values[line.Values.Count - 1].ToString(line.Unit == "长度" ? "0.00" : "0");
-   CanvasText(detailsChart, "● " + line.Label + " " + latest, legendLeft, 0, line.Color, 9);
-   legendLeft += 105;
+   if(chartLegend != null) { var legend=Text("● " + line.Label + " " + latest,13,line.Color); legend.Margin=new Thickness(0,0,16,5); chartLegend.Children.Add(legend); }
   }
   if(detailsChartTitle != null) detailsChartTitle.Text = spectrum ? "频率谱 · 主峰频率（每条指标独立归一化）" : "平滑时域趋势 · " + (normalized ? "多指标独立归一化" : lines[0].Label + "（" + lines[0].Unit + "）");
  }
@@ -2560,8 +2530,18 @@ public class Guard : Window {
 
  [STAThread]
  public static void Main(string[] args) {
+  // Prefer the software compositor for reliable local/remote display. Sampling is unchanged.
+  System.Windows.Media.RenderOptions.ProcessRenderMode = args.Contains("--hardware-rendering") ? System.Windows.Interop.RenderMode.Default : System.Windows.Interop.RenderMode.SoftwareOnly;
+  bool acquired;
+  using(var instance = new System.Threading.Mutex(true,@"Local\DiskGuard.Desktop.Singleton",out acquired))
+  using(var restoreSignal = new System.Threading.EventWaitHandle(false,System.Threading.EventResetMode.AutoReset,@"Local\DiskGuard.Desktop.Restore")) {
+   if(!acquired) { restoreSignal.Set(); return; }
+   try {
   var app = new Application();
    var win = new Guard();
+   var listener = System.Threading.ThreadPool.RegisterWaitForSingleObject(restoreSignal,(state,timedOut) => {
+    try { win.Dispatcher.BeginInvoke(new Action(win.RestoreMain)); } catch { }
+   },null,-1,false);
    app.SessionEnding += (s,e) => win.exitRequested = true;
    if(args.Contains("--preview-dark")) { win.themeMode = ThemeMode.Dark; win.ApplyThemePalette(); win.RebuildShellForTheme(); }
    if(args.Contains("--preview-light")) { win.themeMode = ThemeMode.Light; win.ApplyThemePalette(); win.RebuildShellForTheme(); }
@@ -2585,6 +2565,8 @@ public class Guard : Window {
     t.Start();
    };
   }
-  app.Run(win);
+  try { app.Run(win); } finally { listener.Unregister(null); }
+   } finally { instance.ReleaseMutex(); }
+  }
  }
 }

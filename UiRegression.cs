@@ -85,8 +85,55 @@ class UiRegression {
    var bitmap=new System.Windows.Media.Imaging.RenderTargetBitmap((int)win.ActualWidth,(int)win.ActualHeight,96,96,PixelFormats.Pbgra32); bitmap.Render(win);
    var png=new System.Windows.Media.Imaging.PngBitmapEncoder(); png.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));
    using(var file=System.IO.File.Create("ui-regression.png")) png.Save(file);
+   var targetType = typeof(Guard).GetNestedType("ProbeTarget",BindingFlags.NonPublic);
+   var targets = (System.Collections.IList)typeof(Guard).GetField("probeTargets",Private).GetValue(win);
+   string folder = System.IO.Path.GetFullPath("bin");
+   for(int i=0;i<3;i++) {
+    var target = Activator.CreateInstance(targetType);
+    targetType.GetField("Key").SetValue(target,"fixture"+i);
+    targetType.GetField("Index").SetValue(target,i);
+    targetType.GetField("Label").SetValue(target,"Fixture disk "+i);
+    targetType.GetField("Roots").SetValue(target,new [] { i==0 ? System.IO.Path.GetPathRoot(folder) : (i==1 ? "Y:\\" : "Z:\\") });
+    targetType.GetField("Folder").SetValue(target,folder);
+    targets.Add(target);
+   }
+   Page(win,"Settings");
+   var rows=(StackPanel)typeof(Guard).GetField("probeRows",Private).GetValue(win);
+   Assert(rows.Children.Count==6,"expected one path row and result per physical disk");
+   var first=(Grid)rows.Children[0]; var second=(Grid)rows.Children[2];
+   var check=(CheckBox)((StackPanel)first.Children[2]).Children[1]; check.IsChecked=true;
+   Assert((bool)targetType.GetField("Enabled").GetValue(targets[0]),"disk selection not updated");
+   Assert(!(bool)targetType.GetField("Enabled").GetValue(targets[1]),"disk selection leaked");
+   var input=(TextBox)first.Children[1]; input.ApplyTemplate();
+   Assert(input.Template.FindName("PART_ContentHost",input)!=null,"rounded textbox content host missing");
+   var match=typeof(Guard).GetMethod("TargetMatches",BindingFlags.Static|BindingFlags.NonPublic);
+   Assert((bool)match.Invoke(null,new object[]{targets[0],folder,targets}),"valid physical target rejected");
+   Assert(!(bool)match.Invoke(null,new object[]{targets[1],folder,targets}),"wrong physical disk accepted");
+   check.IsChecked=false;
+   typeof(Guard).GetField("probeEnabled",Private).SetValue(win,true);
+   typeof(Guard).GetMethod("BeginProbeIfDue",Private).Invoke(win,new object[]{true});
+   Assert(typeof(Guard).GetField("probeTask",Private).GetValue(win)==null,"unchecked disks launched probe");
+   var foreign=System.IO.Path.GetFullPath("test-fixtures/unowned-probe/.diskguard-probe/fixed-sequential.bin");
+   string before=System.IO.File.ReadAllText(foreign);
+   typeof(Guard).GetMethod("RunProbe",BindingFlags.Static|BindingFlags.NonPublic).Invoke(null,new object[]{System.IO.Path.GetFullPath("test-fixtures/unowned-probe"),32,10});
+   Assert(System.IO.File.ReadAllText(foreign)==before,"foreign probe file modified");
+   rows.BringIntoView(); win.UpdateLayout(); System.Threading.Thread.Sleep(300); Pump();
+   bitmap=new System.Windows.Media.Imaging.RenderTargetBitmap((int)win.ActualWidth,(int)win.ActualHeight,96,96,PixelFormats.Pbgra32); bitmap.Render(win);
+   png=new System.Windows.Media.Imaging.PngBitmapEncoder(); png.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));
+   using(var file=System.IO.File.Create("bin/settings-regression.png")) png.Save(file);
+   Page(win,"Details"); var chart=(Canvas)typeof(Guard).GetField("detailsChart",Private).GetValue(win);
+   var sentinel=new Border(); chart.Children.Add(sentinel); win.Hide();
+   typeof(Guard).GetMethod("RenderPerformanceChart",Private).Invoke(win,null);
+   typeof(Guard).GetMethod("RenderCurrent",Private).Invoke(win,null);
+   Assert(chart.Children.Contains(sentinel),"hidden chart still rebuilt");
+   typeof(Guard).GetMethod("CreateTray",Private).Invoke(win,null);
+   typeof(Guard).GetField("closeToTray",Private).SetValue(win,true);
+   win.Show(); win.Close(); Pump(); Assert(!win.IsVisible,"close did not hide to tray");
+   typeof(Guard).GetMethod("RestoreMain",Private).Invoke(win,null); Pump(); Assert(win.IsVisible,"tray restore failed");
+   Console.WriteLine("PASS tray close and restore");
+   Console.WriteLine("PASS three-disk rows, independent selection, path validation, foreign-file preservation and hidden rendering");
    Console.WriteLine("PASS all UI regression checks; monitoring/config writes disabled"); return 0;
   } catch(Exception e) { Console.Error.WriteLine(e); return 1; }
-  finally { if(win != null) win.Close(); }
+  finally { if(win != null) { typeof(Guard).GetField("exitRequested",Private).SetValue(win,true); win.Close(); } }
  }
 }

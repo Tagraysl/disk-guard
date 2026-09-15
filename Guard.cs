@@ -76,7 +76,112 @@ public class Guard : Window {
  DateTime lastProbeStart = DateTime.MinValue;
  TextBlock probeStatusText;
  ComboBox probeSizeSelector, probeDurationSelector, probeScheduleSelector;
- TextBox probePathBox;
+ System.Windows.Forms.NotifyIcon tray;
+ bool exitRequested;
+ bool closeToTray;
+ class ProbeTarget {
+  public string Key, Label, Folder = "";
+  public int Index;
+  public string[] Roots = new string[0];
+  public bool Enabled;
+  public ProbeResult Result = new ProbeResult();
+ }
+ List<ProbeTarget> probeTargets = new List<ProbeTarget>();
+ Dictionary<string,string> savedProbeTargets = new Dictionary<string,string>();
+ StackPanel probeRows;
+ bool MainVisible { get { return IsVisible && WindowState != WindowState.Minimized; } }
+
+ static List<ProbeTarget> DiscoverProbeTargets() {
+  var result = new List<ProbeTarget>();
+  using(var search = new ManagementObjectSearcher("SELECT * FROM Win32_DiskDrive"))
+  using(var disks = search.Get()) foreach(ManagementObject disk in disks) {
+   using(disk) {
+    int index = Convert.ToInt32(disk["Index"]);
+    var roots = new List<string>();
+    using(var partitions = disk.GetRelated("Win32_DiskPartition")) foreach(ManagementObject part in partitions) using(part)
+     using(var volumes = part.GetRelated("Win32_LogicalDisk")) foreach(ManagementObject volume in volumes) using(volume) roots.Add(Convert.ToString(volume["DeviceID"]) + "\\");
+    string serial = Convert.ToString(disk["SerialNumber"]).Trim();
+    string model = Convert.ToString(disk["Model"]);
+    string identity = model + "|" + (serial.Length > 0 ? serial : Convert.ToString(disk["PNPDeviceID"]));
+    result.Add(new ProbeTarget { Index = index, Key = Convert.ToBase64String(Encoding.UTF8.GetBytes(identity)).TrimEnd('='), Label = "磁盘 " + index + " · " + model, Roots = roots.Distinct(StringComparer.OrdinalIgnoreCase).ToArray() });
+   }
+  }
+  return result.OrderBy(x => x.Index).ToList();
+ }
+ static bool TargetMatches(ProbeTarget target, string folder, List<ProbeTarget> current) {
+  try {
+   if(!Path.IsPathRooted(folder) || folder.StartsWith(@"\\")) return false;
+   string full = Path.GetFullPath(folder);
+   var owners = current.Where(x => x.Roots.Any(r => String.Equals(r, Path.GetPathRoot(full), StringComparison.OrdinalIgnoreCase))).ToArray();
+   if(owners.Length != 1 || owners[0].Key != target.Key) return false;
+   for(var d = new DirectoryInfo(full); d != null; d = d.Parent)
+    if(d.Exists && (d.Attributes & FileAttributes.ReparsePoint) != 0) return false;
+   return true;
+  } catch { return false; }
+ }
+ async void LoadProbeTargets() {
+  try {
+   var found = await Task.Run(() => DiscoverProbeTargets());
+   foreach(var target in found) {
+    string value;
+    if(savedProbeTargets.TryGetValue(target.Key, out value)) {
+     var fields = value.Split(new [] { '|' }, 2);
+     if(fields.Length == 2) { target.Enabled = fields[0] == "1"; target.Folder = Encoding.UTF8.GetString(Convert.FromBase64String(fields[1])); }
+    } else if(!String.IsNullOrWhiteSpace(probePath) && TargetMatches(target, probePath, found)) { target.Folder = probePath; }
+    else if(target.Roots.Length > 0) target.Folder = Path.Combine(target.Roots[0], "DiskGuardProbe");
+   }
+   probeTargets = found; BuildProbeRows();
+  } catch { if(probeRows != null) { probeRows.Children.Clear(); probeRows.Children.Add(Text("磁盘映射未取得，探针不可用", 12, Muted)); } }
+ }
+ void BuildProbeRows() {
+  if(probeRows == null) return;
+  probeRows.Children.Clear();
+  foreach(var target in probeTargets) {
+   var row = new Grid { Margin = new Thickness(0,0,0,10) };
+   row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(158) });
+   row.ColumnDefinitions.Add(new ColumnDefinition());
+   row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+   var label = Text("磁盘 " + target.Index + "  " + String.Join(" / ", target.Roots), 12, Ink); label.ToolTip = target.Label; label.VerticalAlignment = VerticalAlignment.Center;
+   row.Children.Add(label);
+   var input = StyledTextBox(Double.NaN, target.Folder, new Thickness(0,0,12,0)); input.HorizontalAlignment = HorizontalAlignment.Stretch;
+   input.IsEnabled = target.Roots.Length > 0;
+   input.ToolTip = "填写这块物理硬盘上的文件夹；不支持网络盘、目录联接或无法唯一映射的卷。";
+   input.TextChanged += (s,e) => target.Folder = input.Text.Trim(); input.LostFocus += (s,e) => SaveOptions();
+   Grid.SetColumn(input,1); row.Children.Add(input);
+   var check = new CheckBox { Content = "参与测试", Foreground = Ink, IsChecked = target.Enabled, IsEnabled = target.Roots.Length > 0, VerticalAlignment = VerticalAlignment.Center };
+   check.Checked += (s,e) => { target.Enabled = true; SaveOptions(); };
+   check.Unchecked += (s,e) => { target.Enabled = false; SaveOptions(); };
+   var actions = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+   var browse = ActionButton("浏览…", () => {
+    using(var dialog = new System.Windows.Forms.FolderBrowserDialog()) {
+     dialog.Description = "选择 " + target.Label + " 上的目标文件夹";
+     if(Directory.Exists(target.Folder)) dialog.SelectedPath = target.Folder;
+     else if(target.Roots.Length > 0) dialog.SelectedPath = target.Roots[0];
+     if(dialog.ShowDialog() == System.Windows.Forms.DialogResult.OK) { input.Text = dialog.SelectedPath; SaveOptions(); }
+    }
+   }, HorizontalAlignment.Left);
+   browse.IsEnabled = target.Roots.Length > 0; browse.Margin = new Thickness(0,0,10,0);
+   actions.Children.Add(browse); actions.Children.Add(check);
+   Grid.SetColumn(actions,2); row.Children.Add(actions); probeRows.Children.Add(row);
+   probeRows.Children.Add(Text(target.Roots.Length == 0 ? "没有可用盘符，暂不支持探针测试" : target.Result.Updated == DateTime.MinValue ? "尚未测试" : target.Result.Summary, 11, Muted));
+  }
+  if(probeTargets.Count == 0) probeRows.Children.Add(Text("正在识别物理硬盘及盘符…",12,Muted));
+ }
+ void RestoreMain() { Show(); WindowState = WindowState.Normal; Activate(); RenderCurrent(); }
+ void HideToTray() { SaveOptions(); Hide(); if(floating != null) floating.Hide(); }
+ void ExitApplication() {
+  if(probeTask != null) { MessageBox.Show("探针正在运行，请等待清理完成后退出。"); return; }
+  exitRequested = true; Close();
+ }
+ void CreateTray() {
+  tray = new System.Windows.Forms.NotifyIcon { Text = "磁盘观察室", Icon = System.Drawing.Icon.ExtractAssociatedIcon(System.Reflection.Assembly.GetExecutingAssembly().Location), Visible = true };
+  var menu = new System.Windows.Forms.ContextMenuStrip();
+  menu.Items.Add("打开主界面", null, (s,e) => Dispatcher.BeginInvoke(new Action(RestoreMain)));
+  menu.Items.Add("显示悬浮窗", null, (s,e) => Dispatcher.BeginInvoke(new Action(() => { if(floating == null) floating = new FloatingPanel(this); floating.Show(); floating.Refresh(); })));
+  menu.Items.Add("退出程序", null, (s,e) => Dispatcher.BeginInvoke(new Action(ExitApplication)));
+  tray.ContextMenuStrip = menu;
+  tray.DoubleClick += (s,e) => Dispatcher.BeginInvoke(new Action(RestoreMain));
+ }
   ComboBox performanceIntervalSelector, healthIntervalSelector;
   ComboBox fontSelector;
  string fontFamilyName = "Microsoft YaHei UI";
@@ -718,6 +823,7 @@ public class Guard : Window {
    if(!Directory.Exists(probeDir)) { message = "没有发现残留探针"; return true; }
    if(!OwnProbeDirectory(probeDir, marker)) { message = "发现同名目录但无法确认归属，未删除"; return false; }
    var file = Path.Combine(probeDir, "fixed-sequential.bin");
+   if((File.GetAttributes(probeDir) & FileAttributes.ReparsePoint) != 0) { message = "探针目录是联接，未删除"; return false; }
    if(File.Exists(file)) File.Delete(file);
    if(File.Exists(marker)) File.Delete(marker);
    Directory.Delete(probeDir, false);
@@ -741,6 +847,7 @@ public class Guard : Window {
    Directory.CreateDirectory(full);
    probeDir = Path.Combine(full, ".diskguard-probe"); marker = Path.Combine(probeDir, "owner.txt"); file = Path.Combine(probeDir, "fixed-sequential.bin");
    if(Directory.Exists(probeDir)) {
+    if((File.GetAttributes(probeDir) & FileAttributes.ReparsePoint) != 0) return ProbeFinish(result,"未测试","探针目录不能是目录联接");
     if(!OwnProbeDirectory(probeDir, marker)) return ProbeFinish(result, "未测试", "探针目录已存在但无法确认归属，为避免误删已停止");
     createdProbeDir = true; // 已通过归属标记校验，可在 finally 中清理上次中断留下的目录。
    } else {
@@ -767,13 +874,14 @@ public class Guard : Window {
    long read = 0;
    var readWatch = Stopwatch.StartNew();
    using(var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read, buffer.Length, FileOptions.SequentialScan)) {
-    while(read < result.Bytes) {
+    while(read < result.Bytes && writeWatch.Elapsed.TotalSeconds + readWatch.Elapsed.TotalSeconds < Math.Max(10, Math.Min(120, maxSeconds))) {
      int count = stream.Read(buffer, 0, (int)Math.Min(buffer.Length, result.Bytes - read));
      if(count <= 0) break;
      actual = FnvUpdate(actual, buffer, 0, count); read += count;
     }
    }
    readWatch.Stop();
+   if(read < result.Bytes && writeWatch.Elapsed.TotalSeconds + readWatch.Elapsed.TotalSeconds >= Math.Max(10, Math.Min(120, maxSeconds))) return ProbeFinish(result,"达到时间上限","读回未完成");
    result.ReadMilliseconds = Math.Max(0.1, readWatch.Elapsed.TotalMilliseconds);
    result.ReadMBps = read / 1000000.0 / Math.Max(.001, readWatch.Elapsed.TotalSeconds);
    result.Completed = written == result.Bytes && read == result.Bytes;
@@ -783,8 +891,8 @@ public class Guard : Window {
   catch(IOException ex) { return ProbeFinish(result, "未测试", "文件系统拒绝操作：" + ex.GetType().Name); }
   catch(Exception ex) { return ProbeFinish(result, "未测试", ex.GetType().Name); }
   finally {
-   try { if(!String.IsNullOrWhiteSpace(file) && File.Exists(file)) File.Delete(file); } catch { }
-   try { if(!String.IsNullOrWhiteSpace(marker) && File.Exists(marker) && OwnProbeDirectory(probeDir, marker)) File.Delete(marker); } catch { }
+   try { if(createdProbeDir && OwnProbeDirectory(probeDir, marker) && !String.IsNullOrWhiteSpace(file) && File.Exists(file)) File.Delete(file); } catch { }
+   try { if(createdProbeDir && !String.IsNullOrWhiteSpace(marker) && File.Exists(marker) && OwnProbeDirectory(probeDir, marker)) File.Delete(marker); } catch { }
    try { if(createdProbeDir && !String.IsNullOrWhiteSpace(probeDir) && Directory.Exists(probeDir)) Directory.Delete(probeDir, false); } catch { }
   }
  }
@@ -939,6 +1047,7 @@ public class Guard : Window {
      else if(p[0].Trim().Equals("probe_interval", StringComparison.OrdinalIgnoreCase)) {
       int minutes; if(Int32.TryParse(p[1].Trim(), out minutes)) probeIntervalMinutes = Math.Max(0, Math.Min(10080, minutes));
      }
+     else if(p[0].StartsWith("probe_disk_")) savedProbeTargets[p[0].Substring(11)] = p[1];
      else SetOption(p[0].Trim(), p[1].Trim() == "1", false);
     }
    }
@@ -977,7 +1086,8 @@ public class Guard : Window {
     "probe_max_seconds=" + probeMaxSeconds.ToString(CultureInfo.InvariantCulture),
     "probe_interval=" + probeIntervalMinutes.ToString(CultureInfo.InvariantCulture)
    };
-   File.WriteAllLines(path, lines, Encoding.UTF8);
+   foreach(var target in probeTargets) savedProbeTargets[target.Key] = (target.Enabled ? "1|" : "0|") + Convert.ToBase64String(Encoding.UTF8.GetBytes(target.Folder));
+   File.WriteAllLines(path, lines.Concat(savedProbeTargets.Select(x => "probe_disk_" + x.Key + "=" + x.Value)), Encoding.UTF8);
   } catch { }
  }
  bool GetOption(string key) {
@@ -1188,7 +1298,14 @@ public class Guard : Window {
   timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(performanceIntervalSeconds) };
   timer.Tick += async (s,e) => await Sample();
   if(startMonitoring) timer.Start();
+  bool normalRun = startMonitoring && !Environment.GetCommandLineArgs().Any(x => x.StartsWith("--preview"));
+  closeToTray = normalRun;
+  if(normalRun) { CreateTray(); LoadProbeTargets(); }
+  Closing += (s,e) => { if(closeToTray && !exitRequested) { e.Cancel = true; HideToTray(); } };
+  IsVisibleChanged += (s,e) => { if(MainVisible) RenderCurrent(); };
+  StateChanged += (s,e) => { if(MainVisible) RenderCurrent(); };
   Closed += (s,e) => {
+   if(tray != null) { tray.Visible = false; tray.Dispose(); }
    timer.Stop();
    SystemEvents.UserPreferenceChanged -= OnSystemPreferenceChanged;
    if(floating != null) floating.Close();
@@ -1232,8 +1349,8 @@ public class Guard : Window {
   links.Children.Add(ActionButton("评估依据", () => BuildPage(PageKind.Evidence)));
   links.Children.Add(new Border { Height = 5 });
   links.Children.Add(ActionButton("打开 / 隐藏悬浮插件", () => ToggleFloating()));
-  links.Children.Add(ActionButton("隐藏主窗口到任务栏", () => WindowState = WindowState.Minimized));
-  links.Children.Add(ActionButton("退出程序", () => Close()));
+  links.Children.Add(ActionButton("隐藏到系统托盘", () => { if(tray != null) HideToTray(); else WindowState = WindowState.Minimized; }));
+  links.Children.Add(ActionButton("退出程序", ExitApplication));
 
   main = new Grid { Margin = new Thickness(32,32,24,20) };
   Grid.SetColumn(main, 1); root.Children.Add(main);
@@ -1256,7 +1373,7 @@ public class Guard : Window {
   detailsDataStack = null; detailsChart = null; detailsChartCard = null; chartOptionsPanel = null;
   detailsLayerSelector = detailsDriveSelector = chartDomainSelector = themeSelector = null; chartReadCheck = chartWriteCheck = chartIopsCheck = chartQueueCheck = chartActiveCheck = null;
   detailsChartTitle = detailsSelectionHint = null;
-   ping0StatusText = null; ping0IntervalSelector = null; probeStatusText = null; probePathBox = null; probeSizeSelector = probeDurationSelector = probeScheduleSelector = null; performanceIntervalSelector = healthIntervalSelector = null; fontSelector = null;
+   ping0StatusText = null; ping0IntervalSelector = null; probeStatusText = null; probeRows = null; probeSizeSelector = probeDurationSelector = probeScheduleSelector = null; performanceIntervalSelector = healthIntervalSelector = null; fontSelector = null;
   pageSubtitle = null;
   var scroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
   main.Children.Add(scroll);
@@ -1419,6 +1536,14 @@ public class Guard : Window {
   box.Resources[SystemColors.ControlTextBrushKey] = Ink;
   box.Resources[SystemColors.HighlightBrushKey] = InputHighlight;
   box.Resources[SystemColors.HighlightTextBrushKey] = Ink;
+  var border = new FrameworkElementFactory(typeof(Border));
+  border.SetValue(Border.CornerRadiusProperty, new CornerRadius(10));
+  border.SetBinding(Border.BackgroundProperty, new Binding("Background") { RelativeSource = RelativeSource.TemplatedParent });
+  border.SetBinding(Border.BorderBrushProperty, new Binding("BorderBrush") { RelativeSource = RelativeSource.TemplatedParent });
+  border.SetValue(Border.BorderThicknessProperty, new Thickness(1));
+  var content = new FrameworkElementFactory(typeof(ScrollViewer)); content.Name = "PART_ContentHost";
+  border.AppendChild(content); box.Template = new ControlTemplate(typeof(TextBox)) { VisualTree = border };
+  box.HorizontalAlignment = HorizontalAlignment.Left;
   return box;
  }
 
@@ -1582,7 +1707,8 @@ public class Guard : Window {
    themeMode = (ThemeMode)item.Tag;
    SaveOptions(); ApplyThemePalette(); RebuildShellForTheme();
   };
-  themeStack.Children.Add(themeSelector);
+  var themeRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0,4,0,0) };
+  themeRow.Children.Add(InlineLabel("主题模式",150)); themeRow.Children.Add(themeSelector); themeStack.Children.Add(themeRow);
   panel.Children.Add(Card(themeStack, 18, new Thickness(17,14,17,10)));
 
   var probeStack = new StackPanel();
@@ -1592,13 +1718,7 @@ public class Guard : Window {
   probeEnable.Checked += (s,e) => { probeEnabled = true; lastProbeStart = DateTime.UtcNow; SaveOptions(); RenderProbeVisuals(); };
   probeEnable.Unchecked += (s,e) => { probeEnabled = false; SaveOptions(); RenderProbeVisuals(); };
   probeStack.Children.Add(probeEnable);
-  var probePathRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0,0,0,8) };
-  probePathRow.Children.Add(InlineLabel("目标文件夹", 150));
-  probePathBox = StyledTextBox(360, probePath, new Thickness(0));
-  probePathBox.ToolTip = "请填写目标磁盘上的文件夹，例如 D:\\DiskGuardProbe；测试只在启用后运行。";
-  probePathBox.LostFocus += (s,e) => { probePath = probePathBox.Text.Trim(); SaveOptions(); };
-  probePathRow.Children.Add(probePathBox);
-  probeStack.Children.Add(probePathRow);
+  probeRows = new StackPanel(); probeStack.Children.Add(probeRows); BuildProbeRows();
   var probeOptions = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0,0,0,8) };
   probeOptions.Children.Add(InlineLabel("文件大小", 75));
   probeSizeSelector = StyledComboBox(110, 32, new Thickness(0,0,16,0));
@@ -1624,8 +1744,8 @@ public class Guard : Window {
   probeOptions.Children.Add(probeScheduleSelector);
   probeStack.Children.Add(probeOptions);
   var probeButtons = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0,0,0,4) };
-  var probeNow = ActionButton("立即测试", () => { if(!probeEnabled) { probeStatusText.Text = "请先启用探针功能。"; probeStatusText.Foreground = Amber; } else { probePath = probePathBox.Text.Trim(); BeginProbeIfDue(true); } }, HorizontalAlignment.Center); probeNow.Margin = new Thickness(0,0,10,0); probeButtons.Children.Add(probeNow);
-  var probeClean = ActionButton("清理残留探针", () => { string message; CleanupProbeArtifact(probePathBox.Text.Trim(), out message); probeStatusText.Text = message; probeStatusText.Foreground = message.Contains("失败") || message.Contains("未删除") ? Amber : Teal; }, HorizontalAlignment.Center); probeClean.Margin = new Thickness(0); probeButtons.Children.Add(probeClean);
+  var refreshDisks = ActionButton("刷新硬盘", () => { if(probeTask == null) { SaveOptions(); LoadProbeTargets(); } }, HorizontalAlignment.Left); probeButtons.Children.Add(refreshDisks);
+  var probeNow = ActionButton("测试勾选硬盘", () => { SaveOptions(); BeginProbeIfDue(true); }, HorizontalAlignment.Center); probeNow.Margin = new Thickness(0,0,10,0); probeButtons.Children.Add(probeNow);
   probeStack.Children.Add(probeButtons);
   probeStatusText = Text(probe.Summary, 10, ProbeBrush()); probeStack.Children.Add(probeStatusText);
   panel.Children.Add(Card(probeStack, 18, new Thickness(17,14,17,10)));
@@ -1855,23 +1975,33 @@ public class Guard : Window {
  }
 
  void BeginProbeIfDue(bool force = false) {
-  if(!probeEnabled) return;
-  if(probeTask != null && !probeTask.IsCompleted) return;
-  if(String.IsNullOrWhiteSpace(probePath)) return;
+  if(!probeEnabled) { if(force && probeStatusText != null) probeStatusText.Text = "请先启用探针功能"; return; }
+  if(probeTask != null) return;
+  var targets = probeTargets.Where(x => x.Enabled).Select(x => new ProbeTarget { Key=x.Key, Index=x.Index, Folder=x.Folder }).ToArray();
+  if(targets.Length == 0) { if(force && probeStatusText != null) probeStatusText.Text = "请勾选至少一块硬盘"; return; }
   if(!force && probeIntervalMinutes <= 0) return;
   var now = DateTime.UtcNow;
   if(!force && (now - lastProbeStart).TotalMinutes < probeIntervalMinutes) return;
   lastProbeStart = now;
-  string target = probePath ?? "";
+  string target = String.Join(" / ", targets.Select(x => "磁盘 " + x.Index));
   int size = probeSizeMb;
   int duration = probeMaxSeconds;
   probe = new ProbeResult { Status = "测试中", Target = target, Bytes = Math.Max(32, Math.Min(512, size)) * 1024L * 1024L };
   RenderProbeVisuals();
-  probeTask = Task.Run(() => RunProbe(target, size, duration));
+  probeTask = Task.Run(() => {
+   foreach(var item in targets) {
+    try {
+     item.Result = TargetMatches(item, item.Folder, DiscoverProbeTargets()) ? RunProbe(item.Folder,size,duration) : ProbeFinish(new ProbeResult(),"未测试","路径不属于该硬盘，或映射不唯一/含目录联接");
+    } catch { item.Result = ProbeFinish(new ProbeResult(),"未测试","无法核对硬盘与路径"); }
+   }
+   return new ProbeResult { Status = "批次完成", Error = String.Join("；", targets.Select(x => "磁盘 " + x.Index + "：" + x.Result.Summary)), Updated = DateTime.Now };
+  });
   probeTask.ContinueWith(t => Dispatcher.BeginInvoke(new Action(() => {
    if(t.Status == TaskStatus.RanToCompletion && t.Result != null) probe = t.Result;
    else probe = new ProbeResult { Status = "未测试", Error = "后台任务未完成", Updated = DateTime.Now };
    probeTask = null;
+   foreach(var item in targets) { var original = probeTargets.FirstOrDefault(x => x.Key == item.Key); if(original != null) original.Result = item.Result; }
+   if(MainVisible) BuildProbeRows();
    RenderProbeVisuals();
    RenderCurrent();
   })), TaskScheduler.Default);
@@ -1904,8 +2034,8 @@ public class Guard : Window {
  }
 
  void RenderCurrent() {
-  if(currentPage == PageKind.Overview) RenderOverview();
-  if(currentPage == PageKind.Details) RenderDetails();
+  if(MainVisible && currentPage == PageKind.Overview) RenderOverview();
+  if(MainVisible && currentPage == PageKind.Details) RenderDetails();
   if(floating != null && floating.IsVisible) floating.Refresh();
  }
 
@@ -2285,6 +2415,7 @@ public class Guard : Window {
  }
 
  void RenderPerformanceChart() {
+  if(!MainVisible) return;
   if(detailsChart == null) return;
   detailsChart.Children.Clear();
   var selected = SelectedDetailsDrives();
@@ -2431,6 +2562,7 @@ public class Guard : Window {
  public static void Main(string[] args) {
   var app = new Application();
    var win = new Guard();
+   app.SessionEnding += (s,e) => win.exitRequested = true;
    if(args.Contains("--preview-dark")) { win.themeMode = ThemeMode.Dark; win.ApplyThemePalette(); win.RebuildShellForTheme(); }
    if(args.Contains("--preview-light")) { win.themeMode = ThemeMode.Light; win.ApplyThemePalette(); win.RebuildShellForTheme(); }
   if(args.Contains("--preview-details")) win.Loaded += (s,e) => win.BuildPage(PageKind.Details);

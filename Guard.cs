@@ -34,7 +34,8 @@ public partial class Guard : Window {
  Canvas detailsChart;
  Border detailsChartCard;
  WrapPanel chartOptionsPanel, chartLegend;
- ComboBox detailsLayerSelector, detailsDriveSelector;
+ ComboBox detailsLayerSelector, detailsDriveSelector, detailsAvailabilitySelector;
+ int detailsAvailabilityFilter; // 0 all, 1 available, 2 unavailable
  ComboBox chartDomainSelector, themeSelector;
  CheckBox chartReadCheck, chartWriteCheck, chartIopsCheck, chartQueueCheck, chartActiveCheck;
  TextBlock detailsChartTitle, detailsSelectionHint;
@@ -135,7 +136,7 @@ public partial class Guard : Window {
     string serial = Convert.ToString(disk["SerialNumber"]).Trim();
     string model = Convert.ToString(disk["Model"]);
     string identity = model + "|" + (serial.Length > 0 ? serial : Convert.ToString(disk["PNPDeviceID"]));
-    result.Add(new ProbeTarget { Index = index, Key = Convert.ToBase64String(Encoding.UTF8.GetBytes(identity)).TrimEnd('='), Label = "磁盘 " + index + " · " + model, Roots = roots.Distinct(StringComparer.OrdinalIgnoreCase).ToArray() });
+    result.Add(new ProbeTarget { Index = index, Key = DeviceIdentity(model,serial,Convert.ToString(disk["PNPDeviceID"])), Label = "磁盘 " + index + " · " + model, Roots = roots.Distinct(StringComparer.OrdinalIgnoreCase).ToArray() });
    }
   }
   return result.OrderBy(x => x.Index).ToList();
@@ -302,6 +303,8 @@ public partial class Guard : Window {
   public string Model = "未知型号", Media = "未知介质", Bus = "未知总线", Status = "未知";
   public DateTime CapturedAt = DateTime.UtcNow;
   public string Firmware = "未知", Serial = "未知";
+  public string PnpId="", IdentityKey="";
+  public AtaSmartData Ata=new AtaSmartData();
   public long? SizeBytes, BytesPerSector, Partitions, PowerOnHours, PowerCycleCount;
   public bool SmartFailed, SmartKnown;
   public double? Temperature, TemperatureMax, Wear, AvailableSpare, AvailableSpareThreshold;
@@ -368,7 +371,7 @@ public partial class Guard : Window {
   }
   // 寿命证据只看设备自报的健康/退化字段；瞬时温度和性能不会偷偷混入这里。
   public bool HasLifetimeData {
-   get { return (!String.IsNullOrWhiteSpace(Status) && Status != "未知") || SmartKnown || SmartFailed || Wear.HasValue || AvailableSpare.HasValue || MediaErrors.HasValue || ReadErrors.HasValue || WriteErrors.HasValue || ReadErrorsUncorrected.HasValue || WriteErrorsUncorrected.HasValue || MediaErrorsUncorrected.HasValue || CriticalWarning.HasValue; }
+   get { return (!String.IsNullOrWhiteSpace(Status) && Status != "未知") || SmartKnown || SmartFailed || Wear.HasValue || AvailableSpare.HasValue || MediaErrors.HasValue || ReadErrors.HasValue || WriteErrors.HasValue || ReadErrorsUncorrected.HasValue || WriteErrorsUncorrected.HasValue || MediaErrorsUncorrected.HasValue || CriticalWarning.HasValue || Ata.Attributes.Values.Any(x=>x.Threshold.HasValue && x.Threshold.Value>0 && x.Current>0); }
   }
   public string LifetimeSeverity {
    get {
@@ -379,13 +382,14 @@ public partial class Guard : Window {
       || (bits & 0x1C) != 0;
     if(critical) return "严重";
     bool warning = s.Contains("warning") || s.Contains("警告") || s.Contains("degraded") || s.Contains("关注")
+      || Ata.Attributes.Values.Any(x=>x.ThresholdExceeded)
       || (MediaErrors ?? 0) > 0 || (ReadErrors ?? 0) > 0 || (WriteErrors ?? 0) > 0
       || (ReadErrorsUncorrected ?? 0) > 0 || (WriteErrorsUncorrected ?? 0) > 0 || (MediaErrorsUncorrected ?? 0) > 0
       || (Wear.HasValue && Wear.Value >= 100)
       || (AvailableSpare.HasValue && AvailableSpareThreshold.HasValue && AvailableSpare.Value < AvailableSpareThreshold.Value)
       || (bits & 0x01) != 0;
     if(warning) return "关注";
-    bool checkedEvidence = SmartKnown || Status == "正常" || CriticalWarning.HasValue
+    bool checkedEvidence = SmartKnown || Status == "正常" || CriticalWarning.HasValue || Ata.Attributes.Values.Any(x=>x.Threshold.HasValue && x.Threshold.Value>0 && x.Current>0)
       || MediaErrors.HasValue || ReadErrors.HasValue || WriteErrors.HasValue
       || ReadErrorsUncorrected.HasValue || WriteErrorsUncorrected.HasValue || MediaErrorsUncorrected.HasValue
       || (AvailableSpare.HasValue && AvailableSpareThreshold.HasValue);
@@ -488,7 +492,7 @@ public partial class Guard : Window {
    Active = ActiveValid ? 100 - idle : 0;
    CounterFault = !WriteValid;
    lock(SeriesGate) {
-    if(ReadValid && WriteValid && IopsValid && QueueValid && ActiveValid) Series.Enqueue(new MetricSample { Time = DateTime.UtcNow, Read = Read, Write = Write, Iops = Iops, Queue = Queue, Active = Active }); else Series.Clear(); // 不跨缺失数据连接曲线
+    Series.Enqueue(new MetricSample { Time = DateTime.UtcNow, Read = ReadValid ? Read : Double.NaN, Write = WriteValid ? Write : Double.NaN, Iops = IopsValid ? Iops : Double.NaN, Queue = QueueValid ? Queue : Double.NaN, Active = ActiveValid ? Active : Double.NaN });
     while(Series.Count > 240) Series.Dequeue();
    }
    LastZ = Double.NaN; BaselineMedian = Double.NaN; BaselineMad = Double.NaN; BaselineP95 = Double.NaN; LastCandidate = false;
@@ -591,6 +595,8 @@ public partial class Guard : Window {
     h.Bus = StringValue(Property(o, "InterfaceType"));
     h.Status = StringValue(Property(o, "Status"));
     h.Serial = StringValue(Property(o, "SerialNumber"));
+    h.PnpId=StringValue(Property(o,"PNPDeviceID"));
+    h.IdentityKey=DeviceIdentity(h.Model,h.Serial,h.PnpId);
     h.Firmware = StringValue(Property(o, "FirmwareRevision"));
     h.SizeBytes = LongValue(Property(o, "Size"));
     h.BytesPerSector = LongValue(Property(o, "BytesPerSector"));
@@ -653,7 +659,8 @@ public partial class Guard : Window {
    using(var q = new ManagementObjectSearcher(@"root\wmi", "SELECT * FROM MSStorageDriver_FailurePredictStatus"))
    foreach(ManagementObject o in q.Get()) {
     smartSeen = true;
-    int objectIndex = ExtractIndex(StringValue(Property(o, "InstanceName")));
+    var matched=result.Values.Where(x=>AtaSmartReader.Matches(StringValue(Property(o,"InstanceName")),x.PnpId)).ToArray();
+    int objectIndex = matched.Length==1 ? matched[0].Index : -1;
     if(objectIndex >= 0) { GetHealth(result, objectIndex).SmartSource = "MSStorageDriver_FailurePredictStatus"; GetHealth(result, objectIndex).SmartKnown = Property(o, "PredictFailure") != null; }
     if(Convert.ToBoolean(Property(o, "PredictFailure") ?? false)) {
      int i = objectIndex;
@@ -662,12 +669,19 @@ public partial class Guard : Window {
    }
   } catch(Exception ex) { smartError = ex.GetType().Name; }
 
+  var ataBlocks=AtaSmartReader.ReadWmi(false);var ataLimits=AtaSmartReader.ReadWmi(true);
   foreach(var h in result.Values) {
    if(h.StandardSource == "未采集") h.StandardSource = standardSeen ? "未匹配到基础记录" : (String.IsNullOrEmpty(standardError) ? "未返回" : "接口不可用");
    if(h.ReliabilitySource == "未采集") h.ReliabilitySource = reliabilitySeen ? "未匹配到可靠性记录" : (String.IsNullOrEmpty(reliabilityError) ? "未提供" : "接口不可用");
    if(h.SmartSource == "未采集") h.SmartSource = smartSeen ? "未发现预测记录" : (String.IsNullOrEmpty(smartError) ? "未提供" : "不支持");
 
    NativeStorageHealth native;
+   if(!String.Equals(h.Bus,"NVMe",StringComparison.OrdinalIgnoreCase) && h.Bus!="17") {
+    try { h.Ata=AtaSmartReader.Read(h.Index,h.PnpId,h.Bus,ataBlocks,ataLimits); }
+    catch(Exception ex) {h.Ata=new AtaSmartData {Source="ATA 查询失败",Note=ex.Message};}
+    h.NativeSource=h.Ata.Source;h.NativeNote=h.Ata.Note;
+    continue;
+   }
    StorageProtocolReader.TryReadNvme(h.Index, out native);
    h.NativeSource = native.Source;
    h.NativeNote = native.Note;
@@ -702,7 +716,7 @@ public partial class Guard : Window {
   request.Method = "GET";
   request.Timeout = 12000;
   request.ReadWriteTimeout = 12000;
-  request.UserAgent = "DiskGuard/0.7.0";
+  request.UserAgent = "DiskGuard/0.8.0";
   using(var response = (HttpWebResponse)request.GetResponse())
   using(var stream = response.GetResponseStream())
   using(var reader = new StreamReader(stream, Encoding.UTF8)) return reader.ReadToEnd();
@@ -1328,7 +1342,7 @@ public partial class Guard : Window {
   FontFamily = new FontFamily("Microsoft YaHei UI"); FontSize = UiFont(13);
    WindowStartupLocation = WindowStartupLocation.CenterScreen;
    Background = Brushes.White; Icon = MakeLogo();
-   if(startMonitoring) LoadOptions(); else options = new DisplayOptions();
+   if(startMonitoring) {LoadOptions();LoadSpecifications();} else options = new DisplayOptions();
    activeTextSizeStep = textSizeStep; FontSize = UiFont(13);
    try { FontFamily = UiFontFamily(); } catch { fontFamilyName = "Microsoft YaHei UI"; FontFamily = UiFontFamily(); }
    ApplyThemePalette();
@@ -1370,7 +1384,7 @@ public partial class Guard : Window {
   var footer = new StackPanel();
   footer.Children.Add(Text("●  数据摘要保存在本机", 11, Muted));
   footer.Children.Add(Text("只读监测 · 无需 Python", 11, Muted));
-  footer.Children.Add(Text("Disk Guard / 0.7.0", 10, Muted));
+  footer.Children.Add(Text("Disk Guard / 0.8.0", 10, Muted));
   DockPanel.SetDock(footer, Dock.Bottom); nav.Children.Add(footer);
 
   var links = new StackPanel(); nav.Children.Add(links);
@@ -1594,6 +1608,15 @@ public partial class Guard : Window {
   box.Resources[SystemColors.ControlTextBrushKey] = Ink;
   box.Resources[SystemColors.HighlightBrushKey] = InputHighlight;
   box.Resources[SystemColors.HighlightTextBrushKey] = Ink;
+  var border = new FrameworkElementFactory(typeof(Border));
+  border.SetValue(Border.CornerRadiusProperty, new CornerRadius(10));
+  border.SetBinding(Border.BackgroundProperty, new Binding("Background") { RelativeSource = RelativeSource.TemplatedParent });
+  border.SetBinding(Border.BorderBrushProperty, new Binding("BorderBrush") { RelativeSource = RelativeSource.TemplatedParent });
+  border.SetValue(Border.BorderThicknessProperty, new Thickness(1));
+  var content = new FrameworkElementFactory(typeof(ScrollViewer)); content.Name = "PART_ContentHost";
+  border.AppendChild(content); box.Template = new ControlTemplate(typeof(PasswordBox)) { VisualTree = border };
+  box.HorizontalAlignment = HorizontalAlignment.Left;
+  box.VerticalContentAlignment = VerticalAlignment.Center;
   return box;
  }
 
@@ -1631,6 +1654,14 @@ public partial class Guard : Window {
   for(int i=0;i<4;i+=2) { var field=new StackPanel { Orientation=Orientation.Horizontal, Margin=new Thickness(0,0,0,6) }; field.Children.Add(fieldItems[i]); field.Children.Add(fieldItems[i+1]); controls.Children.Add(field); }
   controls.Children.Add(refresh);
   controlStack.Children.Add(controls);
+  var availabilityRow=new StackPanel {Orientation=Orientation.Horizontal,Margin=new Thickness(0,4,0,4)};
+  availabilityRow.Children.Add(InlineLabel("数据可用性",90));
+  detailsAvailabilitySelector=StyledComboBox(170,32,new Thickness(8,0,0,0));
+  foreach(string label in new[]{"全部展示","只看有数据的","只看没数据的"})detailsAvailabilitySelector.Items.Add(new ComboBoxItem {Content=label});
+  detailsAvailabilitySelector.SelectedIndex=detailsAvailabilityFilter;
+  detailsAvailabilitySelector.ToolTip="筛选下方指标卡片，不改变采集或曲线。0 和“否”是有效数据；缺失、过期、未填写、样本不足及不适用归入没数据。";
+  detailsAvailabilitySelector.SelectionChanged+=(s,e)=>{detailsAvailabilityFilter=detailsAvailabilitySelector.SelectedIndex;RenderDetailsView();};
+  availabilityRow.Children.Add(detailsAvailabilitySelector);controlStack.Children.Add(availabilityRow);
   detailsSelectionHint = Text("正在准备硬盘筛选器…", 10, Muted);
   controlStack.Children.Add(detailsSelectionHint);
   var roleLegend = new UniformGridShim { Columns = 3, Margin = new Thickness(0,3,0,0) };
@@ -1679,6 +1710,8 @@ public partial class Guard : Window {
   var cardStack = new StackPanel();
   BuildMetricSelectors(cardStack);
   panel.Children.Add(Card(cardStack));
+
+  BuildManualSpecifications(panel);
 
    var typeStack = new StackPanel();
    typeStack.Children.Add(HeadingWithHelp("字体与层级", "标题、正文、下拉菜单和悬浮窗统一继承这里的字体；中文字体不可用时由 Windows 自动回退。", 17));
@@ -1814,7 +1847,7 @@ public partial class Guard : Window {
   targetRow.Children.Add(targetBox);
   pingStack.Children.Add(targetRow);
   var keyRow = new WrapPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0,0,0,7) };
-  keyRow.Children.Add(new TextBlock { Text = "API Key（可选）", Width = 185, FontSize = UiFont(11), Foreground = Muted, VerticalAlignment = VerticalAlignment.Center });
+  keyRow.Children.Add(InlineLabel("API Key（可选）",185));
   var keyBox = StyledPasswordBox(220, new Thickness(0,0,10,0));
   keyBox.Password = ping0ApiKey;
   keyBox.ToolTip = "仅保存在本次运行的内存中，不写入配置文件；关闭程序后需要重新输入。";
@@ -1825,7 +1858,7 @@ public partial class Guard : Window {
   keyRow.Children.Add(checkNow);
   pingStack.Children.Add(keyRow);
   var intervalRow = new WrapPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0,0,0,4) };
-  intervalRow.Children.Add(new TextBlock { Text = "自动更新间隔", Width = 185, FontSize = UiFont(11), Foreground = Muted, VerticalAlignment = VerticalAlignment.Center });
+  intervalRow.Children.Add(InlineLabel("自动更新间隔",185));
   ping0IntervalSelector = StyledComboBox(140, 32, new Thickness(0));
   ping0IntervalSelector.Items.Add(new ComboBoxItem { Content = "15 分钟", Tag = 15 });
   ping0IntervalSelector.Items.Add(new ComboBoxItem { Content = "30 分钟", Tag = 30 });
@@ -1936,7 +1969,7 @@ public partial class Guard : Window {
   var formulas = new UniformGridShim { Columns = 2 };
    formulas.Children.Add(FormulaBlock("本盘负载基线", "y = ln(1 + W / 1,000,000)；z = (y − median) / (1.4826 × MAD)", "z > 3.5 且超过本盘 95 分位，并用连续样本覆盖约 5 秒，才标记负载异常；不进入寿命结论。", Blue));
   formulas.Children.Add(FormulaBlock("频率谱", "去均值 → Hann 窗 → Xₖ = Σ xₙe⁻ⁱ²πkn/N；fₖ = k/(NΔt)", "用于观察周期性 I/O；它是工作模式分析，不是健康评分。", Violet));
-  formulas.Children.Add(FormulaBlock("温度风险", "当前温度 ÷ 设备自己报告的温度上限", "只判断当前热风险；没有设备上限就显示未知，不使用跨品牌绝对阈值。", Amber));
+  formulas.Children.Add(FormulaBlock("温度风险", "当前温度与设备温度上限比较；余量 = 上限 − 当前温度", "不对摄氏温度做比例；没有设备上限就显示未知。手填参照另列，不覆盖设备阈值。", Amber));
   formulas.Children.Add(FormulaBlock("寿命证据", "设备自报健康字段 → 严重 / 关注 / 未见告警 / 未知", "不把“今天写得多”换算成寿命下降；长期变化需要同一硬盘跨重启快照的差分。", Red));
   body.Children.Add(formulas);
   body.Children.Add(Text("章节 2 · 学习样本", 14, Ink));
@@ -1966,7 +1999,14 @@ public partial class Guard : Window {
    "计划测试默认“仅手动”；设置每小时、每 6 小时、每天或每周后，程序只在目标路径有效时运行。"));
   body.Children.Add(probeExplain);
   body.Children.Add(Text("章节 4 · 只读与边界", 14, Ink));
-  body.Children.Add(Text("默认监测路径只读，不创建测试文件、不扫描文件内容、不自动修复；原生协议层只发送查询型 IOCTL，频域计算在内存中完成。健康字段缺失时显示未知，程序不会输出没有物理依据的剩余寿命百分比。", 11, Muted));
+  body.Children.Add(Text("默认监测不创建测试文件、不扫描文件内容、不自动修复；原生协议层只发送只读查询及 SMART 读取命令，频域计算在内存中完成。查询可能唤醒休眠硬盘，并非零开销。缺失不视为正常，不输出没有依据的剩余寿命百分比。", 11, Muted));
+  body.Children.Add(ChapterBlock("章节 5 · 机械硬盘与手填参照", "设备实测、厂家资料输入、计算与判断保持分层。", Ink,
+   "机械盘先读取 Windows 健康字段和 WMI SMART 原始属性；已识别的 SATA/ATA 设备尝试 SMART READ DATA / READ THRESHOLDS。不启用自检、不写扇区；透传可能需要管理员权限。USB/SAS/RAID 桥接暂未覆盖，失败时保留明确提示。",
+   "ATA 原始属性显示当前规范化值、最差值、阈值和 48 位 RAW；只比较有效的设备规范化值与设备阈值。原始编码可能因厂家不同，不把温度属性的整个 RAW 直接当摄氏度或把读错误 RAW 一律当错误次数。",
+   "在显示设置的逐盘标称信息中填写已知项即可保存。单位写在每项标题，按设备身份持久保存；重启后保留。手填数值未经核验，不覆盖设备字段，也不自动变成厂家认证数据。",
+   "温度余量 = 手填上限 − 实测温度；下限余量 = 实测温度 − 手填下限。仅对已填写边界判断是否越界，不并入设备告警。",
+   "速率对标 = 当前 MB/s ÷ 标称顺序峰值 × 100%，随机/混合负载与厂家测试条件可能不同，所以不是饱和度。TBW 对标 = 累计主机写入 TB ÷ 手填 TBW × 100%，不是磨损率或剩余寿命；启停/载入卸载累计次数比例同理。缺少任一必要输入就不计算。",
+   "频谱至少需要 8 个连续有效点，不是固定 8 秒；按实际时间间隔换算频率。缺失字段仅影响该曲线；间隔不规则时暂停频谱，不插值伪造周期。零信号显示无可辨周期成分。"));
   panel.Children.Add(Card(body));
  }
 
@@ -2273,6 +2313,7 @@ public partial class Guard : Window {
   var reasons = new List<string>();
   if(h == null || !h.HasLifetimeData) { reasons.Add("寿命相关字段不足，保持“未知”；缺失不是正常。 "); return reasons; }
   if(h.SmartFailed) reasons.Add("SMART 预测失败");
+  foreach(var a in h.Ata.Attributes.Values.Where(x=>x.ThresholdExceeded)) reasons.Add("ATA 属性 "+a.Id+" 规范化值 "+a.Current+" 达到设备返回阈值 "+a.Threshold+"；RAW 的含义仍依赖厂商");
   if(h.Status != "未知" && h.Status != "正常") reasons.Add("设备状态报告为“" + h.Status + "”");
   if(h.CriticalWarning.HasValue && (h.CriticalWarning.Value & 0x1D) != 0) reasons.Add("NVMe 可靠性 / 备用空间 / 只读相关警告 0x" + h.CriticalWarning.Value.ToString("X2"));
   if(h.Wear.HasValue && h.Wear.Value >= 100) reasons.Add("设备报告估计耐久度已消耗；不等于已经故障，也不是故障概率");
@@ -2323,7 +2364,7 @@ public partial class Guard : Window {
     if(index < 0 || index >= array.Length) continue;
     var p = array[index]; point.Time = p.Time; point.Read += p.Read; point.Write += p.Write; point.Iops += p.Iops; point.Queue += p.Queue; point.Active += p.Active; count++;
    }
-   if(count > 0) result.Add(point);
+   if(count == arrays.Length) { point.Active /= count; result.Add(point); }
   }
   return result;
  }
@@ -2341,11 +2382,13 @@ public partial class Guard : Window {
   int start = values.Count - n;
   double dt = 1.0;
   var intervals = new List<double>();
-  if(points != null) for(int i = Math.Max(1, start); i < points.Count; i++) {
+  if(points != null) for(int i = start + 1; i < points.Count; i++) {
    double seconds = (points[i].Time - points[i - 1].Time).TotalSeconds;
-   if(seconds > .05 && seconds < 10) intervals.Add(seconds);
+   if(seconds > .05 && seconds < 120) intervals.Add(seconds);
   }
   if(intervals.Count > 0) { var sortedIntervals = intervals.OrderBy(x => x).ToArray(); dt = sortedIntervals[sortedIntervals.Length / 2]; }
+  if(points != null && (intervals.Count != n-1 || intervals.Any(x => Math.Abs(x-dt)>dt*.25))) return result;
+  if(values.Skip(start).Any(x => Double.IsNaN(x) || Double.IsInfinity(x))) return result;
   double mean = values.Skip(start).Take(n).Average();
   var signal = new double[n];
   for(int i = 0; i < n; i++) {
@@ -2397,36 +2440,46 @@ public partial class Guard : Window {
   bool spectrum = chartDomain == ChartDomain.Frequency;
   if(detailsChartTitle != null) detailsChartTitle.Text = spectrum ? "频率谱 · 等待样本" : "动态性能曲线 · 等待采样";
   if(points.Count < (spectrum ? 8 : 2)) {
-   CanvasText(detailsChart, selected.Count == 0 ? "等待发现硬盘…" : (spectrum ? "正在积累频率样本（至少需要 8 秒）…" : "正在积累动态样本（至少需要 2 秒）…"), 18, height / 2 - 10, Muted, 11);
+   CanvasText(detailsChart, selected.Count == 0 ? "等待发现硬盘…" : (spectrum ? "正在积累样本："+points.Count+" / 8 个采样点（不是固定 8 秒）" : "正在积累动态样本（至少 2 个采样点）…"), 18, height / 2 - 10, Muted, 11);
    return;
   }
   var lines = new List<ChartLine>();
   if(chartReadCheck == null || chartReadCheck.IsChecked == true) {
    var line = new ChartLine { Label = "读取", Color = SeriesBrush("读取"), Values = points.Select(x => x.Read).ToList(), Unit = "MB/s" };
-   if(spectrum) { var spec = ComputeSpectrum(line.Values, points); line.Values = spec.Magnitudes; line.Frequencies = spec.Frequencies; line.Unit = "Hz"; }
-   if(!spectrum || line.Values.Count > 0) lines.Add(line);
+   lines.Add(line);
   }
   if(chartWriteCheck == null || chartWriteCheck.IsChecked == true) {
    var line = new ChartLine { Label = "写入", Color = SeriesBrush("写入"), Values = points.Select(x => x.Write).ToList(), Unit = "MB/s" };
-   if(spectrum) { var spec = ComputeSpectrum(line.Values, points); line.Values = spec.Magnitudes; line.Frequencies = spec.Frequencies; line.Unit = "Hz"; }
-   if(!spectrum || line.Values.Count > 0) lines.Add(line);
+   lines.Add(line);
   }
   if(chartIopsCheck != null && chartIopsCheck.IsChecked == true) {
    var line = new ChartLine { Label = "IOPS", Color = SeriesBrush("IOPS"), Values = points.Select(x => x.Iops).ToList(), Unit = "次/s" };
-   if(spectrum) { var spec = ComputeSpectrum(line.Values, points); line.Values = spec.Magnitudes; line.Frequencies = spec.Frequencies; line.Unit = "Hz"; }
-   if(!spectrum || line.Values.Count > 0) lines.Add(line);
+   lines.Add(line);
   }
   if(chartQueueCheck != null && chartQueueCheck.IsChecked == true) {
    var line = new ChartLine { Label = "队列", Color = SeriesBrush("队列"), Values = points.Select(x => x.Queue).ToList(), Unit = "长度" };
-   if(spectrum) { var spec = ComputeSpectrum(line.Values, points); line.Values = spec.Magnitudes; line.Frequencies = spec.Frequencies; line.Unit = "Hz"; }
-   if(!spectrum || line.Values.Count > 0) lines.Add(line);
+   lines.Add(line);
   }
   if(chartActiveCheck != null && chartActiveCheck.IsChecked == true) {
    var line = new ChartLine { Label = "活跃", Color = SeriesBrush("活跃"), Values = points.Select(x => x.Active).ToList(), Unit = "%" };
-   if(spectrum) { var spec = ComputeSpectrum(line.Values, points); line.Values = spec.Magnitudes; line.Frequencies = spec.Frequencies; line.Unit = "Hz"; }
-   if(!spectrum || line.Values.Count > 0) lines.Add(line);
+   lines.Add(line);
   }
   if(lines.Count == 0) { CanvasText(detailsChart, "请至少勾选一条曲线", 18, height / 2 - 10, Muted, 11); return; }
+  var unavailable = new List<string>();
+  foreach(var line in lines.ToArray()) {
+   int tail=ContiguousValidTail(line.Values,points);
+   if(tail < (spectrum ? 8 : 2)) { unavailable.Add(line.Label+"（有效连续点 "+tail+"）");lines.Remove(line); }
+   else line.Values=line.Values.Skip(line.Values.Count-tail).ToList();
+  }
+  if(unavailable.Count>0 && chartLegend!=null) chartLegend.Children.Add(Text("缺失 / 样本不足："+String.Join("、",unavailable),12,Muted));
+  if(lines.Count==0) { CanvasText(detailsChart,"所选指标无足够连续有效样本；其他字段的缺失不会再清空读写历史",18,height/2-10,Muted,11); return; }
+  int common=lines.Min(x=>x.Values.Count);
+  points=points.Skip(points.Count-common).ToList();
+  foreach(var line in lines) {
+   line.Values=line.Values.Skip(line.Values.Count-common).ToList();
+   if(spectrum) { var spec=ComputeSpectrum(line.Values,points);line.Values=spec.Magnitudes;line.Frequencies=spec.Frequencies;line.Unit="Hz"; }
+  }
+  if(lines.Any(x=>x.Values.Count==0)) { CanvasText(detailsChart,"采样时间间隔不稳定，暂不计算频谱；请等待连续稳定样本",18,height/2-10,Muted,11); return; }
   bool normalized = spectrum || lines.Count > 1;
   double left = 48, right = 12, top = 16, bottom = 26, plotWidth = Math.Max(20, width - left - right), plotHeight = Math.Max(20, height - top - bottom);
   double singleMax = lines.Count == 1 && !spectrum ? lines[0].Values.Max() : 1;
@@ -2477,19 +2530,42 @@ public partial class Guard : Window {
    string latest;
    if(spectrum) {
     int peak = 0; for(int i = 1; i < line.Values.Count; i++) if(line.Values[i] > line.Values[peak]) peak = i;
-    latest = "峰值 " + (line.Frequencies == null || line.Frequencies.Count == 0 ? "—" : line.Frequencies[peak].ToString("0.###") + " Hz");
+    latest = line.Values.Max() <= 1e-12 ? "无可辨周期成分" : "峰值 " + (line.Frequencies == null || line.Frequencies.Count == 0 ? "—" : line.Frequencies[peak].ToString("0.###") + " Hz");
    } else latest = line.Unit == "MB/s" ? Rate(line.Values[line.Values.Count - 1]) : line.Unit == "%" ? line.Values[line.Values.Count - 1].ToString("0") + "%" : line.Values[line.Values.Count - 1].ToString(line.Unit == "长度" ? "0.00" : "0");
    if(chartLegend != null) { var legend=Text("● " + line.Label + " " + latest,13,line.Color); legend.Margin=new Thickness(0,0,16,5); chartLegend.Children.Add(legend); }
   }
   if(detailsChartTitle != null) detailsChartTitle.Text = spectrum ? "频率谱 · 主峰频率（每条指标独立归一化）" : "平滑时域趋势 · " + (normalized ? "多指标独立归一化" : lines[0].Label + "（" + lines[0].Unit + "）");
  }
 
+ static int ContiguousValidTail(List<double> values,List<MetricSample> points) {
+  int count=0; double interval=0;
+  for(int i=values.Count-1;i>=0;i--) {
+   if(Double.IsNaN(values[i])||Double.IsInfinity(values[i])) break;
+   if(i<values.Count-1 && points!=null) {
+    double gap=(points[i+1].Time-points[i].Time).TotalSeconds;
+    if(gap<=0) break;
+    if(interval==0) interval=gap;
+    else if(Math.Abs(gap-interval)>interval*.25) break;
+   }
+   count++;
+  }
+  return count;
+ }
+ string detailsLayoutKey;
+ StackPanel lastDetailsStack;
+ readonly List<Action> detailValueUpdates=new List<Action>();
  void RenderDetailsView() {
   if(detailsDataStack == null) return;
   RefreshDetailsDriveSelector();
   var selected = SelectedDetailsDrives();
   if(detailsSelectionHint != null) detailsSelectionHint.Text = selected.Count == 0 ? "尚未发现物理磁盘" : "已选 " + selected.Count + " 块硬盘 · 原始字段不做跨盘比较";
   if(detailsDataStack == null) return;
+  string layoutKey=selectedDataView+"|"+String.Join("|",selected.Select(d=>d.Name+":"+d.GetHashCode()))+"|"+CardFill.GetHashCode();
+  if(lastDetailsStack==detailsDataStack && detailsLayoutKey==layoutKey && detailValueUpdates.Count>0) {
+   foreach(var update in detailValueUpdates) update();
+   RenderPerformanceChart(); return;
+  }
+  lastDetailsStack=detailsDataStack;detailsLayoutKey=layoutKey;detailValueUpdates.Clear();
   detailsDataStack.Children.Clear();
   if(drives.Count == 0) {
    detailsDataStack.Children.Add(Card(Text("正在连接性能计数器…", 13, Muted)));

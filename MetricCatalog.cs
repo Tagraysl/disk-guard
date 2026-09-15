@@ -64,6 +64,20 @@ public partial class Guard {
   field("ReadLatencyMax","最大读取延迟","温度与使用记录",null); field("WriteLatencyMax","最大写入延迟","温度与使用记录",null); field("FlushLatencyMax","最大刷新延迟","温度与使用记录",null);
   add("raw_Source","数据来源",RawLayer,"来源与接口",null,(d,h)=>h.SourceSummary(),false,true,"来源元数据，不参与风险评分。");
   field("NativeSource","原生接口","来源与接口",null); field("NativeNote","接口说明","来源与接口",null);
+  foreach(int attributeId in new [] {1,4,5,7,9,10,12,187,188,190,192,193,194,196,197,198,199}) {
+   byte id=(byte)attributeId;
+   string hint=id==5?"常见重映射":id==197?"常见待处理扇区":id==198?"常见离线不可纠正":id==199?"常见接口 CRC":id==194||id==190?"常见温度编码":id==9?"常见通电时间":id==193?"常见载入卸载":"厂商定义";
+   add("ata_"+id,"ATA "+id+" · "+hint,RawLayer,"ATA SMART 原始属性",null,(d,h)=>{AtaAttribute a;return h.Ata.Attributes.TryGetValue(id,out a)?a.Display:"未返回 / 接口未支持";},false,true,"常见名称仅供识别，不保证厂商采用相同含义或单位。展示当前/最差规范化值、设备阈值和完整 48 位 RAW；不会把 RAW 直接换算成寿命。");
+  }
+  add("ata_source","ATA 采集来源",RawLayer,"ATA SMART 原始属性",null,(d,h)=>h.Ata.Source+" · "+h.Ata.Note,false,true,"WMI 只读 SMART 与 SATA/ATA 只读透传；USB/SAS/RAID 桥接未覆盖时明确说明。");
+  add("ata_attributes","全部 ATA 属性",RawLayer,"ATA SMART 原始属性",null,(d,h)=>h.Ata.Valid?String.Join("\n",h.Ata.Attributes.Values.OrderBy(a=>a.Id).Select(a=>a.Id+": "+a.Display)):"未返回 / 接口未支持",false,true,"完整属性列表，未识别的属性保留原始编码，不猜测单位或用途。");
+  foreach(var f in SpecFields) {
+   var specField=f;
+   add("manual_"+f.Id,"手填 · "+f.Title,RawLayer,"手填标称输入 · 非设备实测",null,(d,h)=>ManualValue(h,specField.Id),false,false,"来自用户填写，未经核验；单位："+f.Unit+"。不会覆盖设备报告值。");
+   add("reference_"+f.Id,f.Title+"对标值",DerivedLayer,"手填参照计算 · 非寿命",null,(d,h)=>ManualCalculation(d,h,specField.Id),false,false,"只在所需字段齐全时计算。速率比例不等于容量利用率；次数和 TBW 比例不等于磨损或故障概率。温度差值用 °C 表示。");
+  }
+  add("manual_source","手填资料来源",RawLayer,"手填标称输入 · 非设备实测",null,(d,h)=>ManualValue(h,"source"),false,false,"用户注明的资料，软件不会自动访问或核验。");
+  add("manual_thermal_state","手填温度范围判断",ConclusionLayer,"手填参照 · 独立于设备告警",null,(d,h)=>ManualTemperatureState(h),false,false,"允许只填写上界或下界；判断只覆盖已填写的边界，不替代设备告警。");
 
   add("active","忙碌占比",DerivedLayer,"区间计算","active",(d,h)=>Observed(d.Active,d.ActiveValid,"0.0","%"),true,false,"100% − 空闲时间占比。不等于带宽利用率，也不是健康判断。");
   add("throughput","总吞吐量",DerivedLayer,"区间计算",null,(d,h)=>Observed((d.Read+d.Write)/1000000,d.ReadValid&&d.WriteValid,"0.0"," MB/s"),true,false,"读取速率 + 写入速率。");
@@ -119,12 +133,14 @@ public partial class Guard {
  }
  IEnumerable<string> MetricChoiceLines() { return metricChoices.OrderBy(x=>x.Key).Select(x=>"metric_"+x.Key+"="+(x.Value?"1":"0")); }
  string MetricValue(MetricDefinition m, Drive d, Health h) {
+  if(h!=null && h.Bus=="NVMe" && m.Id.StartsWith("ata_"))return "设备协议不适用（NVMe）";
+  if(h!=null && h.MediaLabel=="HDD" && new [] {"raw_Wear","raw_AvailableSpare","raw_AvailableSpareThreshold","raw_CriticalWarning","raw_DataUnitsReadBytes","raw_DataUnitsWrittenBytes","raw_HostReadCommands","raw_HostWriteCommands","raw_ControllerBusyMinutes","raw_UnsafeShutdowns","raw_ErrorLogEntries","spare_margin"}.Contains(m.Id))return "本接口不适用（SSD/NVMe 字段）";
   if(m.NeedsPerformance && !PerformanceFresh(d)) return "等待采样 / 数据已过期";
   if(m.NeedsHealth && !HealthFresh(h)) return h==null ? "无法获取" : "数据已过期";
   return m.Read(d,h);
  }
  Brush MetricColor(MetricDefinition m, Drive d, Health h, string value) {
-  if(value.Contains("无法")||value.Contains("不足")||value.Contains("未知")||value.Contains("过期")||value.Contains("学习")||value.Contains("不适用")) return Muted;
+  if(value.Contains("无法")||value.Contains("不足")||value.Contains("未知")||value.Contains("过期")||value.Contains("学习")||value.Contains("不适用")||value.Contains("未填写")||value.Contains("未返回")) return Muted;
   if(m.Layer==ConclusionLayer) {
    string state=m.Id=="health"&&h!=null ? h.LifetimeSeverity : m.Id=="thermal"&&h!=null ? h.ThermalRisk : "";
    return state=="严重" ? Red : state=="关注" ? Amber : state=="未见告警" ? Teal : Ink;
@@ -154,26 +170,57 @@ public partial class Guard {
    panel.Children.Add(expander);
   }
  }
+ static bool HasDisplayData(string value) {
+  if(String.IsNullOrWhiteSpace(value))return false;
+  return !new[]{"无法","未采集","未返回","未填写","未知","未尝试","等待","数据已过期","样本不足","证据不足","阈值未知","缺少","不适用","设备类型不适用","设备类型未知","设备协议不适用","本接口不适用","温度或设备阈值不足","学习"}.Any(x=>value.Trim().StartsWith(x,StringComparison.Ordinal));
+ }
+ bool ShowMetricValue(string value) {return detailsAvailabilityFilter==0 || HasDisplayData(value)==(detailsAvailabilityFilter==1);}
  void BuildCatalogView(List<Drive> selected, string layer) {
   detailsDataStack.Children.Add(HeadingWithHelp(layer,LayerHelp,20));
   foreach(var d in selected) {
    Health h; health.TryGetValue(d.Index,out h);
    var stack=new StackPanel();
-   if(layer==ConclusionLayer) stack.Children.Add(DriveHeading(d,HealthFresh(h)?h:null));
-   else stack.Children.Add(Text("磁盘 "+d.Index+" · "+(h==null?"型号无法获取":h.Model),15,Ink));
+   var title=Text("磁盘 "+d.Index+" · "+(h==null?"型号无法获取":h.Model),15,Ink);stack.Children.Add(title);
+   detailValueUpdates.Add(()=>{Health current;health.TryGetValue(d.Index,out current);title.Text="磁盘 "+d.Index+" · "+(current==null?"型号无法获取":current.Model);});
    foreach(var section in Metrics().Where(x=>x.Layer==layer).GroupBy(x=>x.Section)) {
-    stack.Children.Add(HeadingWithHelp(section.Key,LayerHelp,16));
+    var sectionHeading=HeadingWithHelp(section.Key,LayerHelp,16);stack.Children.Add(sectionHeading);
+    var sectionItems=new List<FrameworkElement>();
     var grid=new UniformGridShim {Columns=layer==ConclusionLayer ? 3 : 6};
     foreach(var m in section) {
      string value=MetricValue(m,d,h); var tile=InfoTile(m.Title,value,MetricColor(m,d,h,value));
-     tile.ToolTip=MetricHelp(m,d,h); grid.Children.Add(tile);
+     tile.ToolTip=MetricHelp(m,d,h);
+     FrameworkElement display=tile;
+     if(m.Id=="ata_attributes") {
+      var scroll=new ScrollViewer {Content=tile,MaxHeight=240,VerticalScrollBarVisibility=ScrollBarVisibility.Auto};
+      display=new Expander {Header="完整 ATA 属性 · 点击展开",Content=scroll,Foreground=Ink,FontSize=UiFont(14),Margin=new Thickness(0,8,0,8)};stack.Children.Add(display);
+     } else grid.Children.Add(tile);
+     sectionItems.Add(display);display.Visibility=ShowMetricValue(value)?Visibility.Visible:Visibility.Collapsed;
+     var valueText=(TextBlock)((StackPanel)tile.Child).Children[1];
+     detailValueUpdates.Add(()=>{
+      Health current;health.TryGetValue(d.Index,out current);
+      string next=MetricValue(m,d,current);if(valueText.Text!=next)valueText.Text=next;
+      display.Visibility=ShowMetricValue(next)?Visibility.Visible:Visibility.Collapsed;
+      valueText.Foreground=MetricColor(m,d,current,next);
+      string tip=MetricHelp(m,d,current);if(!Equals(tile.ToolTip,tip))tile.ToolTip=tip;
+     });
     }
     stack.Children.Add(grid);
+    Action updateSection=()=>{bool any=sectionItems.Any(x=>x.Visibility==Visibility.Visible);sectionHeading.Visibility=any?Visibility.Visible:Visibility.Collapsed;grid.Visibility=grid.Children.Cast<UIElement>().Any(x=>x.Visibility==Visibility.Visible)?Visibility.Visible:Visibility.Collapsed;};
+    updateSection();detailValueUpdates.Add(updateSection);
    }
+   var empty=Text("当前筛选下没有匹配指标",13,Muted);stack.Children.Add(empty);
+   Action updateEmpty=()=>empty.Visibility=stack.Children.OfType<UniformGridShim>().Any(g=>g.Visibility==Visibility.Visible)||stack.Children.OfType<Expander>().Any(x=>x.Visibility==Visibility.Visible)?Visibility.Collapsed:Visibility.Visible;
+   updateEmpty();detailValueUpdates.Add(updateEmpty);
    detailsDataStack.Children.Add(Card(stack,18,new Thickness(16,16,16,14)));
   }
  }
+ StackPanel lastFloatingBody;
+ string floatingLayoutKey;
+ readonly List<Action> floatingValueUpdates=new List<Action>();
  void FillFloating(StackPanel body) {
+  string key=String.Join("|",drives.Values.OrderBy(x=>x.Index).Select(x=>x.Name+":"+x.GetHashCode()))+"|"+String.Join("|",Metrics().Where(x=>MetricSelected(x.Id)).Select(x=>x.Id))+"|"+CardFill.GetHashCode();
+  if(lastFloatingBody==body && floatingLayoutKey==key) {foreach(var update in floatingValueUpdates)update();return;}
+  lastFloatingBody=body;floatingLayoutKey=key;floatingValueUpdates.Clear();
   body.Children.Clear();
   if(drives.Count==0) body.Children.Add(Text("等待硬盘采样…",13,Muted));
   foreach(var d in drives.Values.OrderBy(x=>x.Index)) {
@@ -190,11 +237,12 @@ public partial class Guard {
      row.ColumnDefinitions.Add(new ColumnDefinition {Width=new GridLength(1.2,GridUnitType.Star)});
      var label=Text(m.Title,12,Muted); label.Margin=new Thickness(0,0,10,0); row.Children.Add(label);
      var text=Text(value,13,MetricColor(m,d,h,value)); Grid.SetColumn(text,1); row.Children.Add(text); row.ToolTip=MetricHelp(m,d,h);
+     floatingValueUpdates.Add(()=>{Health current;health.TryGetValue(d.Index,out current);string next=MetricValue(m,d,current);if(text.Text!=next)text.Text=next;text.Foreground=MetricColor(m,d,current,next);string tip=MetricHelp(m,d,current);if(!Equals(row.ToolTip,tip))row.ToolTip=tip;});
      rows.Children.Add(row);
     }
-    string key=d.Name+"|"+layer; bool expanded;
-    var group=new Expander {Header=layer+" · "+picked.Count,Content=rows,Foreground=Ink,FontSize=UiFont(13),Margin=new Thickness(0,7,0,0),IsExpanded=!floatingGroups.TryGetValue(key,out expanded)||expanded};
-    group.Expanded+=(s,e)=>floatingGroups[key]=true; group.Collapsed+=(s,e)=>floatingGroups[key]=false;
+    string groupKey=d.Name+"|"+layer; bool expanded;
+    var group=new Expander {Header=layer+" · "+picked.Count,Content=rows,Foreground=Ink,FontSize=UiFont(13),Margin=new Thickness(0,7,0,0),IsExpanded=!floatingGroups.TryGetValue(groupKey,out expanded)||expanded};
+    group.Expanded+=(s,e)=>floatingGroups[groupKey]=true; group.Collapsed+=(s,e)=>floatingGroups[groupKey]=false;
     disk.Children.Add(group);
    }
    if(disk.Children.Count==1) disk.Children.Add(Text("尚未勾选磁盘指标 · 点右上角“指标”设置",12,Muted));
@@ -203,7 +251,7 @@ public partial class Guard {
   var extras=Metrics().Where(x=>x.Layer==ExtraLayer&&MetricSelected(x.Id)).ToList();
   if(extras.Count>0) {
    var extra=new StackPanel(); extra.Children.Add(Text("附加功能 · 独立于硬盘评价",13,Ink));
-   foreach(var m in extras) {var text=Text(m.Title+"  "+MetricValue(m,null,null),13,Ink);text.ToolTip=m.Help;extra.Children.Add(text);}
+   foreach(var m in extras) {var text=Text(m.Title+"  "+MetricValue(m,null,null),13,Ink);text.ToolTip=m.Help;extra.Children.Add(text);floatingValueUpdates.Add(()=>text.Text=m.Title+"  "+MetricValue(m,null,null));}
    body.Children.Add(Card(extra,15,new Thickness(12,10,12,8)));
   }
  }

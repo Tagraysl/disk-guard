@@ -155,7 +155,7 @@ class UiRegression {
     var driveType = typeof(Guard).GetNestedType("Drive", BindingFlags.NonPublic);
     var driveMap = (System.Collections.IDictionary)typeof(Guard).GetField("drives",Private).GetValue(win);
     driveMap["99 Test"] = Activator.CreateInstance(driveType, new object[] { "99 Test", false });
-    Page(win,"Details"); CheckCombo(win,"detailsDriveSelector");
+    Page(win,"Details"); CheckCombo(win,"detailsDriveSelector"); CheckCombo(win,"detailsAvailabilitySelector");
     Console.WriteLine("PASS theme: " + theme);
    }
    var tileMethod = typeof(Guard).GetMethod("InfoTile",Private);
